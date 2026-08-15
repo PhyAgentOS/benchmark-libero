@@ -1,0 +1,38 @@
+# 两节点评测闭环：benchmark ↔ policy，无中间节点。
+#
+# 跑：BENCHMARK_CONFIG=./config.yaml dora run dataflow.example.yaml
+
+nodes:
+  - id: libero_benchmark
+    path: <PY312_WITH_LIBERO>/bin/python
+    args: -u main.py
+    env:
+      BENCHMARK_CONFIG: ./config.yaml
+      MUJOCO_GL: egl
+      PYOPENGL_PLATFORM: egl
+    inputs:
+      action: policy/action
+    outputs:
+      - proprio_state
+      - image/main
+      - image/second
+      - policy_command
+      - benchmark_status
+      - benchmark_result
+
+  - id: policy
+    path: ../../bin/lerobot_infer/lerobot_infer
+    args: infer --config ./policy_vla_jepa.yaml
+    inputs:
+      tick: dora/timer/millis/20
+      policy_command:
+        source: libero_benchmark/policy_command
+        # 必须显式加深：episode 边界会连发 set_instruction + reset_scene，
+        # 默认队列深度会把前一条挤掉，表现为首个 episode 拿着上一句指令跑完——
+        # 照样出分，不报错。
+        queue_size: 32
+      proprio_state: libero_benchmark/proprio_state
+      image/main: libero_benchmark/image/main
+      image/second: libero_benchmark/image/second
+    outputs:
+      - action

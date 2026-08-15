@@ -1,0 +1,29 @@
+# LIBERO benchmark 节点配置（手册 §3.2 参数契约）
+
+suite: libero_spatial          # libero_spatial / libero_object / libero_goal / libero_10
+
+# 批次 = task_ids × init_state_ids × num_runs 的笛卡尔积，串行执行。
+# 支持 all / "0-9" / "0,2-4,8" / [0,1,2]；留空或 all = suite 全集。
+task_ids: "0-1"
+init_state_ids: "0-1"
+num_runs: 1
+
+max_steps: 300                 # 单 episode 步数上限，超了记 timed_out（算失败）
+num_steps_wait: 10             # reset 后的预热步数，不计入 episode 步数
+control_mode: relative         # relative = robosuite use_delta；absolute 走绝对位姿
+seed: 0
+
+# 必须和 checkpoint 的训练分辨率一致。改分辨率 = 改训练分布。
+camera_height: 256
+camera_width: 256
+
+# 必须和 policy 配置里的 policy_id 一致，否则 policy 会忽略我们的命令。
+policy_id: vla_jepa_libero
+
+# 每个 episode 把该 task 的语言指令下发给 policy。
+# LIBERO 每个 task 指令不同，而 policy 配置里的 instruction 是写死的一句——
+# 关掉这项等于整批用同一句错指令推理，跑出来的分数没有意义。
+send_instruction: true
+
+result_dir: results/benchmark
+record_dir: null               # 非空则每 episode 落 mp4（暂未实现）
