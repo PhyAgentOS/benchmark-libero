@@ -73,7 +73,60 @@ dora --version
 | forge-msgs / forge-policy | — | `forge_policy` 提供 policy 节点的事件循环，处理 `policy_command` |
 | robosuite / mujoco | 1.4.0 + 3.x | robosuite 的三参数 `mj_fullM` 只有 mujoco 3.x 认 |
 
-**策略权重建议全部本地化**到 `$MODELS`，并导 `HF_HUB_OFFLINE=1`，避免运行时依赖网络。
+**策略权重建议全部本地化**到 `$MODELS`，并导 `HF_HUB_OFFLINE=1`，避免运行时依赖网络。来源见 §1.3。
+
+---
+
+### 1.3 策略权重来源
+
+全部来自 HuggingFace 官方仓库。**离线部署前先本地化下载到 `$MODELS` 并固定 revision**
+（`huggingface-cli download <repo> --revision <hash>`），运行时导 `HF_HUB_OFFLINE=1`。
+
+**VLA-JEPA**（Qwen3-VL 骨干 + Flow-matching DiT 动作头）
+
+| 组件 | 下载地址 | HF repo id | 本地目录名 | 大小 | 许可证 |
+|:---|:---|:---|:---|---:|:---|
+| Policy checkpoint | https://huggingface.co/lerobot/VLA-JEPA-LIBERO | `lerobot/VLA-JEPA-LIBERO` | `vla_jepa_libero` | 5.8 G | Apache-2.0 |
+| Qwen3-VL 骨干 | https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct | `Qwen/Qwen3-VL-2B-Instruct` | `qwen3_vl_2b_instruct` | 4.0 G | Apache-2.0 |
+| V-JEPA2 编码器 | https://huggingface.co/facebook/vjepa2-vitl-fpc64-256 | `facebook/vjepa2-vitl-fpc64-256` | `vjepa2_vitl_fpc64_256` | 6.0 G | MIT |
+
+```bash
+huggingface-cli download lerobot/VLA-JEPA-LIBERO          --local-dir $MODELS/vla_jepa_libero
+huggingface-cli download Qwen/Qwen3-VL-2B-Instruct        --local-dir $MODELS/qwen3_vl_2b_instruct
+huggingface-cli download facebook/vjepa2-vitl-fpc64-256   --local-dir $MODELS/vjepa2_vitl_fpc64_256   # 推理可跳过
+```
+
+> V-JEPA2 是**训练专用**的世界模型，推理不执行。配置里设 `enable_world_model: false`
+> 即可完全跳过加载，省 6 G 权重与显存——本节点的验收就是这么跑的。
+> 骨干与编码器的本地路径由 checkpoint 的 `qwen_model_name` / `jepa_encoder_name`
+> 引用，离线部署时在 policy 配置里显式指向 `$MODELS` 下的目录。
+
+**LingBot-VA**（纯视频-动作世界模型，无 `observation.state`）
+
+| 组件 | 下载地址 | HF repo id | 本地目录名 | 大小 | 许可证 |
+|:---|:---|:---|:---|---:|:---|
+| Policy checkpoint | https://huggingface.co/lerobot/lingbot_va_libero_long | `lerobot/lingbot_va_libero_long` | `lingbot_va_libero_long` | 9.5 G | 见仓库 |
+| 冻结 Wan VAE + UMT5 | https://huggingface.co/robbyant/lingbot-va-base | `robbyant/lingbot-va-base` | `lingbot_va_base_frozen` | 14 G | 见仓库 |
+
+```bash
+huggingface-cli download lerobot/lingbot_va_libero_long --local-dir $MODELS/lingbot_va_libero_long
+huggingface-cli download robbyant/lingbot-va-base       --local-dir $MODELS/lingbot_va_base_frozen
+```
+
+冻结目录必须含三个子目录：`text_encoder/`（UMT5，11 G）、`vae/`（Wan VAE，2.7 G）、`tokenizer/`（21 M）。
+
+> **坑**：checkpoint 的 `config.json` 里 `wan_pretrained_path` 写的是
+> `robbyant/lingbot-va-posttrain-libero-long`，那是个**在线 repo 路径**。离线跑必须在
+> policy 配置里用 `wan_pretrained_path` 覆盖成本地的 `$MODELS/lingbot_va_base_frozen`，
+> 否则会去联网拉取。
+
+**其他策略的权重情况**（截至 2026-08-16）
+
+| 策略 | 状态 |
+|:---|:---|
+| ACT | 内部训练产物，需经 `lerobot convert` 转成 LeRobot 格式；无公开来源 |
+| Pi0.5 | 内部训练产物（`lerobot_trainer`）；另需本地 PaliGemma tokenizer |
+| Diffusion | 官方 LeRobot Hub 系列，如 `lerobot/diffusion_pusht` → https://huggingface.co/lerobot/diffusion_pusht （Apache-2.0）。**注意是 PushT 域**：2D state / 2D action / 96×96，**不能跑 LIBERO** |
 
 ---
 
@@ -387,11 +440,49 @@ pyproject.toml               包声明；LIBERO/robosuite 刻意不写进依赖�
 
 ---
 
-## 8. 验证状态
+## 8. 测试矩阵
 
-**已验证**：完整 Forge 两节点闭环（VLA-JEPA + LingBot-VA，结构完全不同的两个策略）、adapter 口径（三条独立证据：归一化统计量量纲、原始 demo 字段结构、实测分数高于已发表基线）、`policy_command` 四条命令时序、1:1 锁步、批次展开与 `t/i/r` 索引、场景可复现、越界 fail fast、异常路径必落盘、结果 schema。
+截至 2026-08-16 实际跑过的组合。**"两节点"= 完整 Forge dataflow（benchmark 节点 + policy 节点经 dora 通信）；"离线"= 策略在同一进程内直接驱动 env，用同一套 adapter，但不经 dora。**
 
-**未验证**：dora 两节点只跑过 4 个和 2 个 episode，那个 100 episode 的数字是**离线闭环**跑的——长批次下的 dora 链路稳定性（跨 10 个 task 反复重建 env、几百 episode 的内存表现）没有证据。suite 只测过 `libero_spatial` 和 `libero_10`，`object` / `goal` / `90` / `100` 没碰过。
+### 8.1 已测出分数
+
+| 策略 | suite | 规模 | 渲染 | 方式 | success_rate | 平均延迟 | 耗时 |
+|:---|:---|:---|---:|:---|---:|---:|---:|
+| VLA-JEPA | libero_spatial | 2 task × 2 init = 4 ep | 256 | **两节点** | **4/4 = 100%** | 16.3 ms | 20 s |
+| VLA-JEPA | libero_spatial | 10 task × 10 init = 100 ep | 256 | 离线 | **94/100 = 94.0%** | 15–28 ms | 643 s |
+| VLA-JEPA | libero_spatial | 10 task × 10 init = 100 ep | 224 | 离线 | **96/100 = 96.0%** | 15–28 ms | 603 s |
+| LingBot-VA | libero_10 | 2 task × 1 init = 2 ep | 256 | **两节点** | **2/2 = 100%** | 221 ms | 129 s |
+| LingBot-VA | libero_10 | 2 task × 2 init = 4 ep | 256 | 离线 | **3/4 = 75%** | 245–310 ms | 322 s |
+
+统一参数：`max_steps=300`、`num_steps_wait=10`、`control_mode=relative`、`seed=0`、`layout_mode=per_episode`。
+
+**参照基线**：OpenVLA 在 LIBERO-Spatial 为 84.7%。VLA-JEPA 的 94–96% 高于它，反过来说明观测口径没有系统性错误——口径错了不可能高于基线。
+
+**渲染 224 vs 256 无显著差异**：两组共同失败 3 个（t5_i0/i4/i5），256 独有 3 个，224 独有 1 个，McNemar 精确检验 p = 0.63。默认保持 256。
+
+**失败模式**：VLA-JEPA 的 6 个失败全部集中在 task 5 且全是 `timed_out`，没有碰撞失败。但调大 `max_steps` 没用——所有成功 episode 最长只跑 137 步，失败的都跑满 300 步，是策略卡住不是时间不够。
+
+### 8.2 未通过 / 未测
+
+| 策略 | 状态 | 原因 |
+|:---|:---|:---|
+| Diffusion（`diffusion_synth`） | ⚠️ 能加载能推理（398 ms） | **PushT 域**：2D state / 2D action / 96×96，跑不了 LIBERO |
+| Diffusion（`diffusion_pusht`） | ❌ 加载失败 | `ProcessorMigrationError`，旧版归一化格式，需跑 lerobot 的 `migrate_policy_normalization.py` |
+| ACT | ❌ 未测 | 盘上无 checkpoint（内部训练产物） |
+| Pi0.5 | ❌ 未测 | 盘上无 checkpoint（内部训练产物） |
+| SmolVLA（`smolvla_libero`） | ⚠️ 未测 | config 声明 `observation.state` 6 维，归一化统计量却是 8 维，口径自相矛盾；且需 3 个相机而 LIBERO 只有 2 个 |
+
+### 8.3 验证覆盖与缺口
+
+**已验证**：完整 Forge 两节点闭环、adapter 口径（三条独立证据：checkpoint 归一化统计量的量纲、LIBERO 原始 demo 的字段结构、实测分数高于已发表基线）、`policy_command` 四条命令时序、1:1 锁步、批次展开与 `t/i/r` 索引、场景可复现、越界 fail fast、异常路径必落盘、结果 schema。
+
+两个策略结构差异很大——VLA-JEPA 有 `observation.state`、LingBot-VA 没有，chunk 7 vs 16，延迟差 13 倍——都跑通，说明节点不是只对某一个策略凑合。
+
+**缺口**：
+
+- 两节点只跑过 4 ep 和 2 ep，**100 ep 那个数字是离线跑的**。长批次下 dora 链路的稳定性（跨 10 个 task 反复重建 env、几百 episode 的内存表现）没有证据
+- suite 只测过 `libero_spatial` 和 `libero_10`，**`object` / `goal` / `90` / `100` 没碰过**
+- `num_runs > 1` 没有实测过（`layout_mode=per_episode` 下不同 run 会拿到不同布局，理论上有差异，但没验）
 
 ---
 
