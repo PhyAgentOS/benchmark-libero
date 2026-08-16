@@ -13,6 +13,16 @@ num_steps_wait: 10             # reset 后的预热步数，不计入 episode �
 control_mode: relative         # relative = robosuite use_delta；absolute 走绝对位姿
 seed: 0
 
+# 家具(炉子/柜体这类无关节 fixture)的位姿存在 model.body_pos/body_quat 里, 属于
+# "模型"而不是"状态", 而 set_init_state 只恢复 qpos/qvel -- 所以 env.reset() 重新
+# 采样的家具摆放不会被 init_state 恢复。实测同一 (task, init_state) 在不同 reset 次序
+# 下炉子会漂 1.5 cm、渲染图 10% 像素不同。
+#   per_episode(默认): 每 episode 按 (seed,task,init,run) 重新播种 -> 布局是 episode
+#                      身份的纯函数, 改 num_runs 也不会让同一 init_state 换场景
+#   fixed            : 每个 task 只用一套布局 -> init_state 唯一确定场景(做状态分支用)
+#   legacy           : 旧行为, 布局取决于"该 task 内第几次 reset"(复现旧结果时才用)
+layout_mode: per_episode
+
 # 必须和 checkpoint 的训练分辨率一致。改分辨率 = 改训练分布。
 camera_height: 256
 camera_width: 256

@@ -9,7 +9,7 @@ from typing import Any
 
 SCHEMA_VERSION = "benchmark_execution_result_v1"
 
-# 恢复/重试相关字段（手册 §4 + P2）：本节点不做恢复重试，一律 null，
+# 恢复/重试相关字段（手册 §4）：本节点不做恢复重试，一律 null，
 # 留给 Forge/PAOS 上层在暴露给契约层时填充。
 _RECOVERY_FIELDS = (
     "first_attempt_successes",
@@ -33,6 +33,9 @@ class EpisodeRecord:
     termination: str  # success / failed / timed_out
     num_steps: int
     return_value: float
+    # 决定本 episode 家具布局的种子。布局不在 init_state 里（见 adapter.capture_layout），
+    # 记下来才能复现同一个场景。
+    episode_seed: int | None = None
     mean_policy_latency_ms: float | None = None
     success_source: str = "env.env._check_success"
     error_code: str | None = None
@@ -50,6 +53,7 @@ class EpisodeRecord:
             "termination": self.termination,
             "num_steps": self.num_steps,
             "return_value": self.return_value,
+            "episode_seed": self.episode_seed,
             "mean_policy_latency_ms": self.mean_policy_latency_ms,
             "success_source": self.success_source,
             "error_code": self.error_code,
@@ -63,6 +67,8 @@ class BenchmarkResult:
     control_mode: str
     max_steps: int
     total_episodes: int
+    layout_mode: str = "per_episode"
+    seed: int = 0
     status: str = "running"
     episodes: list[EpisodeRecord] = field(default_factory=list)
     elapsed_s: float | None = None
@@ -77,7 +83,12 @@ class BenchmarkResult:
 
     @property
     def mean_policy_latency_ms(self) -> float | None:
-        vals = [e.mean_policy_latency_ms for e in self.episodes if e.mean_policy_latency_ms]
+        # 用 is not None 而不是真值判断：延迟恰好为 0.0 的 episode 不该被悄悄丢掉。
+        vals = [
+            e.mean_policy_latency_ms
+            for e in self.episodes
+            if e.mean_policy_latency_ms is not None
+        ]
         return sum(vals) / len(vals) if vals else None
 
     def to_dict(self) -> dict[str, Any]:
@@ -91,6 +102,10 @@ class BenchmarkResult:
             "execution_mode": "target_native",
             "control_mode": self.control_mode,
             "max_steps": self.max_steps,
+            # 复现口径：场景 = init_state(qpos/qvel) + 家具布局(model.body_pos/quat)。
+            # 后者由 layout_mode + seed 决定，不记就无法复现。
+            "layout_mode": self.layout_mode,
+            "seed": self.seed,
             "successes": self.successes,
             "total_episodes": self.total_episodes,
             "completed_episodes": completed,

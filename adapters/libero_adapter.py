@@ -1,7 +1,7 @@
 """LIBERO adapter：env 生命周期、观测转换、成功判定。
 
 benchmark 特有的东西全部收敛在这里；main.py 的批次调度核心不认识 LIBERO。
-换 benchmark 就换这个模块（手册 §2.2 / §7.3）。
+换 benchmark 就换这个模块（手册 §5.2）。
 """
 
 from __future__ import annotations
@@ -38,7 +38,14 @@ def quat_to_axisangle(quat: np.ndarray) -> np.ndarray:
 class LiberoAdapter:
     """进程内持有 LIBERO env，不经过 TargetWS、不经过 mujoco_sim。"""
 
-    def __init__(self, suite_name: str, camera_height: int, camera_width: int, seed: int) -> None:
+    def __init__(
+        self,
+        suite_name: str,
+        camera_height: int,
+        camera_width: int,
+        seed: int,
+        layout_mode: str = "per_episode",
+    ) -> None:
         os.environ.setdefault("MUJOCO_GL", "egl")
         os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
         # conda 版 mujoco 用 CONDA_PREFIX 定位 include/bin，取不到就是
@@ -55,10 +62,13 @@ class LiberoAdapter:
         self.camera_height = camera_height
         self.camera_width = camera_width
         self.seed = seed
+        self.layout_mode = layout_mode
 
         self._env = None
         self._env_task_id: int | None = None
         self._init_states_cache: dict[int, np.ndarray] = {}
+        # layout_mode == "fixed" 时，每个 task 记住第一次抽到的家具布局
+        self._task_layout: dict[int, tuple[np.ndarray, np.ndarray]] = {}
 
     # ---- 批次展开需要的元信息 ----
 
@@ -104,11 +114,59 @@ class LiberoAdapter:
         self._env_task_id = task_id
         return env
 
+    # ---- 场景布局（family: fixture 位姿在 model 里，不在 state 里）----
+
+    def _sim(self):
+        """拿到真正持有 sim 的那一层。判定函数也在这一层，包装层上没有。"""
+        for target in (getattr(self._env, "env", None), self._env):
+            sim = getattr(target, "sim", None)
+            if sim is not None:
+                return sim
+        raise RuntimeError("LIBERO env 上找不到 sim")
+
+    def capture_layout(self) -> tuple[np.ndarray, np.ndarray]:
+        """快照家具布局。
+
+        `set_init_state()` 只恢复 qpos/qvel，而无关节的 fixture（炉子、柜体）位姿
+        存在 model.body_pos/body_quat 里——属于"模型"不属于"状态"，恢复不到。
+        实测 reset 之间只有这两个字段会变，恢复它们即可让整局逐位复现。
+        """
+        m = self._sim().model
+        return (
+            np.array(m.body_pos, dtype=np.float64).copy(),
+            np.array(m.body_quat, dtype=np.float64).copy(),
+        )
+
+    def restore_layout(self, layout: tuple[np.ndarray, np.ndarray]) -> None:
+        m = self._sim().model
+        m.body_pos[:] = layout[0]
+        m.body_quat[:] = layout[1]
+
     def reset_episode(
-        self, task_id: int, init_state_id: int, num_steps_wait: int, control_mode: str
+        self,
+        task_id: int,
+        init_state_id: int,
+        num_steps_wait: int,
+        control_mode: str,
+        episode_seed: int | None = None,
     ) -> dict[str, Any]:
         env = self._ensure_env(task_id)
+
+        # per_episode：把摆放随机数钉在 episode 身份上，布局与"该 task 内第几次 reset"
+        # 解耦——否则改 num_runs / init_state_ids 会让同一个 init_state_id 拿到
+        # 另一套家具位置，跨配置的结果不可比。
+        if self.layout_mode == "per_episode" and episode_seed is not None:
+            env.seed(int(episode_seed))
+
         env.reset()
+
+        if self.layout_mode == "fixed":
+            layout = self._task_layout.get(task_id)
+            if layout is None:
+                self._task_layout[task_id] = self.capture_layout()
+            else:
+                self.restore_layout(layout)
+
         obs = env.set_init_state(self._init_states(task_id)[init_state_id])
 
         # 预热：让物体在重力下落稳。这些步不计入 episode 步数。
@@ -136,7 +194,7 @@ class LiberoAdapter:
     def check_success(self) -> bool:
         """成功判定。
 
-        实测：`OffScreenRenderEnv` 上没有 `_check_success`（手册 §3.3.1 写的是它，
+        实测：`OffScreenRenderEnv` 上没有 `_check_success`（旧手册 §3.3.1 写的是它，
         照抄会 AttributeError），真正的实现在被包一层的 `env.env` 上；`info` 是空
         字典，所以 `info["is_success"]` 那条路也不通。这里逐层兜底。
         """
