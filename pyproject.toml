@@ -1,8 +1,8 @@
 [project]
-name = "forge-runtime-benchmarks-libero"
+name = "forge-benchmark-libero"
 version = "0.1.0"
-description = "LIBERO benchmark node for Forge (embedded LIBERO env, two-node topology)"
-requires-python = ">=3.10"
+description = "Standalone LIBERO benchmark node for Forge"
+requires-python = ">=3.12,<3.13"
 dependencies = [
     "dora-rs==0.4.1",
     "forge-msgs",
@@ -10,8 +10,20 @@ dependencies = [
     "pyarrow",
     "pyyaml>=6.0",
     # LIBERO 与 robosuite 由评测环境提供（见 README 的环境要求），不在此声明，
-    # 避免把一整套仿真依赖拖进 forge_runtime 的解析。
+    # 避免把一整套仿真依赖拖进基础节点环境。
 ]
 
+[dependency-groups]
+dev = [
+    "pytest>=8,<9",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.uv]
+package = false
+
 [tool.uv.sources]
-forge-msgs = { git = "https://gitlab.ex-ai.cn/PhyAgentOS/framework/forge.git", subdirectory = "packages/msgs", rev = "dev" }
+forge-msgs = { git = "https://gitlab.ex-ai.cn/PhyAgentOS/framework/forge.git", subdirectory = "packages/msgs", rev = "83be2093b80310c438fa8f1d0d9a593123469d7d" }

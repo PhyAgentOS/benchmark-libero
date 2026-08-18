@@ -21,7 +21,7 @@ nodes:
       - benchmark_result
 
   - id: policy
-    path: ../../bin/lerobot_infer/lerobot_infer
+    path: <LEROBOT_INFER_BIN>
     args: infer --config ./policy_vla_jepa.yaml
     inputs:
       tick: dora/timer/millis/20

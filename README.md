@@ -15,6 +15,12 @@ benchmark 节点（本节点）                     policy 节点（不改）
 不经过 TargetWS、不经过 mujoco_sim。判定、动作、重置全走 LIBERO 官方接口。
 设计规范见《Benchmark 接入手册》v14（PhyAgentOS 文档库），本节点是它的参考实现。
 
+拆仓不改变 Dora 端口契约：
+
+- 输入：`action`，来源为 policy 的 7D `JointCommand`；
+- 输出：`proprio_state`（8D `JointState`）、`image/main`、`image/second`、
+  `policy_command`、`benchmark_status`、`benchmark_result`。
+
 **已验证**（2026-08-16，完整 Forge 两节点）：
 
 | 策略 | suite | 结果 | 耗时 | 平均延迟 |
@@ -37,11 +43,22 @@ benchmark 节点（本节点）                     policy 节点（不改）
 |:---|:---|
 | `$BENCH_PY` | 评测用 python 解释器的**绝对路径**（该环境须同时具备 libero / dora / forge_msgs / forge_policy / lerobot / torch+CUDA） |
 | `$DORA_BIN` | `dora` 命令行所在目录 |
-| `$FORGE_RUNTIME` | 本仓库（forge_runtime）根目录 |
+| `$LIBERO_NODE_ROOT` | 本仓库根目录 |
 | `$LEROBOT_RUNNER` | lerobot_runner 仓库根目录 |
 | `$MODELS` | 策略权重目录 |
 | `$WORK` | 存放本次评测三个配置文件的工作目录 |
 | `$PKG_LINK` | 给 policy 节点用的包软链目录（见 §2.2） |
+
+独立仓库：
+
+```bash
+git clone https://gitlab.ex-ai.cn/PhyAgentOS/framework/benchmark/libero.git
+cd libero
+uv sync --all-groups
+uv run pytest -q
+```
+
+`uv sync` 安装节点基础依赖；LIBERO/robosuite 和 policy 推理依赖仍由评测环境提供。
 
 ### 1.2 两个环境的分工
 
@@ -206,7 +223,7 @@ image_inputs:
 nodes:
   - id: libero_benchmark
     path: $BENCH_PY
-    args: -u $FORGE_RUNTIME/packages/nodes/benchmarks/libero/main.py
+    args: -u $LIBERO_NODE_ROOT/main.py
     env:
       BENCHMARK_CONFIG: $WORK/bench.yaml
       MUJOCO_GL: egl
@@ -268,7 +285,7 @@ stub 是个假 policy，只回空动作。**`success_rate` 恒为 0 是预期行
 
 ```bash
 export PATH=$DORA_BIN:$PATH
-cd $FORGE_RUNTIME/packages/nodes/benchmarks/libero
+cd $LIBERO_NODE_ROOT
 dora run dataflow_stub.yaml          # stub 不需要 GPU 与策略权重
 ```
 
