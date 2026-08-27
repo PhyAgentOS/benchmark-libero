@@ -19,7 +19,7 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "_core/tests"]
 pythonpath = ["."]
 
 [tool.uv]

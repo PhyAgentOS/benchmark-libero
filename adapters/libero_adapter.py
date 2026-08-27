@@ -1,6 +1,6 @@
 """LIBERO adapter：env 生命周期、观测转换、成功判定。
 
-benchmark 特有的东西全部收敛在这里；main.py 的批次调度核心不认识 LIBERO。
+benchmark 特有的东西全部收敛在这里；_core 的调度不认识 LIBERO。
 换 benchmark 就换这个模块（手册 §5.2）。
 """
 
@@ -8,21 +8,32 @@ from __future__ import annotations
 
 import os
 import sys
-from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 
+def _import_core(name):
+    """导 _core.<name>；父目录只临时挂上，避免遮蔽同名仿真器包（见 main.py 注释）。"""
+    import importlib
+
+    try:
+        return importlib.import_module("_core." + name)
+    except ImportError:
+        p = str(Path(__file__).resolve().parents[2])
+        sys.path.insert(0, p)
+        try:
+            return importlib.import_module("_core." + name)
+        finally:
+            if p in sys.path:
+                sys.path.remove(p)
+
+
+_m = _import_core("adapter")
+StepOutcome = _m.StepOutcome
+
 # LIBERO 预热用的空动作：前 6 维为 0，gripper 维 -1.0 保持张开。
 DUMMY_ACTION: list[float] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0]
-
-
-@dataclass
-class StepOutcome:
-    obs: dict[str, Any]
-    reward: float
-    done: bool
-    success: bool
 
 
 def quat_to_axisangle(quat: np.ndarray) -> np.ndarray:
@@ -38,37 +49,41 @@ def quat_to_axisangle(quat: np.ndarray) -> np.ndarray:
 class LiberoAdapter:
     """进程内持有 LIBERO env，不经过 TargetWS、不经过 mujoco_sim。"""
 
-    def __init__(
-        self,
-        suite_name: str,
-        camera_height: int,
-        camera_width: int,
-        seed: int,
-        layout_mode: str = "per_episode",
-    ) -> None:
+    SUCCESS_SOURCE = "env.env._check_success"
+
+    def __init__(self, cfg) -> None:
         os.environ.setdefault("MUJOCO_GL", "egl")
         os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
         # conda 版 mujoco 用 CONDA_PREFIX 定位 include/bin，取不到就是
-        # `os.path.join(None, ...)` 当场 TypeError。而 CONDA_PREFIX 只有
-        # `conda activate` 才会设——dora 直接拉起解释器时没有。sys.prefix
-        # 就是本 env 的根，等价且不依赖外部怎么启动。
+        # os.path.join(None, ...) 当场 TypeError。而该变量只有 conda activate
+        # 才会设——dora 直接拉起解释器时没有。sys.prefix 等价且不依赖启动方式。
         os.environ.setdefault("CONDA_PREFIX", sys.prefix)
 
         from libero.libero import benchmark, get_libero_path
 
+        self.cfg = cfg
         self._get_libero_path = get_libero_path
-        self.suite_name = suite_name
-        self.suite = benchmark.get_benchmark_dict()[suite_name]()
-        self.camera_height = camera_height
-        self.camera_width = camera_width
-        self.seed = seed
-        self.layout_mode = layout_mode
+        self.suite = benchmark.get_benchmark_dict()[cfg.suite]()
 
         self._env = None
         self._env_task_id: int | None = None
         self._init_states_cache: dict[int, np.ndarray] = {}
-        # layout_mode == "fixed" 时，每个 task 记住第一次抽到的家具布局
         self._task_layout: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+
+    # ---- 给结果文件的复现口径 ----
+
+    def reproducibility(self) -> dict[str, Any]:
+        return {
+            "layout_mode": self.cfg.layout_mode,
+            "control_mode": self.cfg.control_mode,
+            "num_steps_wait": self.cfg.num_steps_wait,
+            "camera": [self.cfg.camera_height, self.cfg.camera_width],
+        }
+
+    def state_joint_names(self) -> list[str]:
+        from config import STATE_JOINTS
+
+        return STATE_JOINTS
 
     # ---- 批次展开需要的元信息 ----
 
@@ -92,12 +107,11 @@ class LiberoAdapter:
     # ---- env 生命周期 ----
 
     def _ensure_env(self, task_id: int):
-        """同一个 task 复用 env；换 task 才重建（建 env 约 2s，别每 episode 重建）。"""
+        """同一个 task 复用 env；换 task 才重建（建 env 约 2s）。"""
         if self._env is not None and self._env_task_id == task_id:
             return self._env
 
         self.close()
-
         from libero.libero.envs import OffScreenRenderEnv
 
         task = self.suite.get_task(task_id)
@@ -106,18 +120,17 @@ class LiberoAdapter:
         )
         env = OffScreenRenderEnv(
             bddl_file_name=bddl,
-            camera_heights=int(self.camera_height),
-            camera_widths=int(self.camera_width),
+            camera_heights=int(self.cfg.camera_height),
+            camera_widths=int(self.cfg.camera_width),
         )
-        env.seed(self.seed)
+        env.seed(self.cfg.seed)
         self._env = env
         self._env_task_id = task_id
         return env
 
-    # ---- 场景布局（family: fixture 位姿在 model 里，不在 state 里）----
+    # ---- 场景布局：fixture 位姿在 model 里，不在 state 里 ----
 
     def _sim(self):
-        """拿到真正持有 sim 的那一层。判定函数也在这一层，包装层上没有。"""
         for target in (getattr(self._env, "env", None), self._env):
             sim = getattr(target, "sim", None)
             if sim is not None:
@@ -125,12 +138,6 @@ class LiberoAdapter:
         raise RuntimeError("LIBERO env 上找不到 sim")
 
     def capture_layout(self) -> tuple[np.ndarray, np.ndarray]:
-        """快照家具布局。
-
-        `set_init_state()` 只恢复 qpos/qvel，而无关节的 fixture（炉子、柜体）位姿
-        存在 model.body_pos/body_quat 里——属于"模型"不属于"状态"，恢复不到。
-        实测 reset 之间只有这两个字段会变，恢复它们即可让整局逐位复现。
-        """
         m = self._sim().model
         return (
             np.array(m.body_pos, dtype=np.float64).copy(),
@@ -142,25 +149,22 @@ class LiberoAdapter:
         m.body_pos[:] = layout[0]
         m.body_quat[:] = layout[1]
 
+    # ---- episode ----
+
     def reset_episode(
-        self,
-        task_id: int,
-        init_state_id: int,
-        num_steps_wait: int,
-        control_mode: str,
-        episode_seed: int | None = None,
+        self, task_id: int, init_state_id: int, run_index: int, episode_seed: int
     ) -> dict[str, Any]:
         env = self._ensure_env(task_id)
 
-        # per_episode：把摆放随机数钉在 episode 身份上，布局与"该 task 内第几次 reset"
-        # 解耦——否则改 num_runs / init_state_ids 会让同一个 init_state_id 拿到
-        # 另一套家具位置，跨配置的结果不可比。
-        if self.layout_mode == "per_episode" and episode_seed is not None:
+        # per_episode：把摆放随机数钉在 episode 身份上，布局与"该 task 内第几次
+        # reset"解耦——否则改 num_runs / init_state_ids 会让同一个 init_state_id
+        # 拿到另一套家具位置，跨配置的结果不可比。
+        if self.cfg.layout_mode == "per_episode":
             env.seed(int(episode_seed))
 
         env.reset()
 
-        if self.layout_mode == "fixed":
+        if self.cfg.layout_mode == "fixed":
             layout = self._task_layout.get(task_id)
             if layout is None:
                 self._task_layout[task_id] = self.capture_layout()
@@ -169,12 +173,11 @@ class LiberoAdapter:
 
         obs = env.set_init_state(self._init_states(task_id)[init_state_id])
 
-        # 预热：让物体在重力下落稳。这些步不计入 episode 步数。
-        for _ in range(max(0, num_steps_wait)):
+        for _ in range(max(0, self.cfg.num_steps_wait)):
             obs, _, _, _ = env.step(DUMMY_ACTION)
 
         # use_delta 必须在 reset 之后设，reset 会把 controller 覆盖回默认值。
-        use_delta = control_mode.lower() not in {"absolute", "abs"}
+        use_delta = self.cfg.control_mode.lower() not in {"absolute", "abs"}
         for robot in env.robots:
             robot.controller.use_delta = use_delta
 
@@ -182,22 +185,23 @@ class LiberoAdapter:
 
     def step(self, action: np.ndarray) -> StepOutcome:
         env = self._require_env()
-        act = np.asarray(action, dtype=np.float32).reshape(-1)[:7]
+        act = np.asarray(action, dtype=np.float32).reshape(-1)
+        if act.size < 7 or not np.all(np.isfinite(act)):
+            raise ValueError(f"LIBERO action must contain 7 finite values, got size={act.size}")
+        act = act[:7]
         obs, reward, done, _info = env.step(act.tolist())
+        success = self.check_success()
         return StepOutcome(
             obs=obs,
             reward=float(reward),
             done=bool(done),
-            success=self.check_success(),
+            success=success,
+            metrics={"success": success},
         )
 
     def check_success(self) -> bool:
-        """成功判定。
-
-        实测：`OffScreenRenderEnv` 上没有 `_check_success`（旧手册 §3.3.1 写的是它，
-        照抄会 AttributeError），真正的实现在被包一层的 `env.env` 上；`info` 是空
-        字典，所以 `info["is_success"]` 那条路也不通。这里逐层兜底。
-        """
+        """实测：OffScreenRenderEnv 上没有 _check_success（旧手册写的是它，照抄会
+        AttributeError），实现在被包一层的 env.env 上；info 是空字典。逐层兜底。"""
         env = self._require_env()
         for target in (getattr(env, "env", None), env):
             checker = getattr(target, "_check_success", None)
@@ -209,7 +213,7 @@ class LiberoAdapter:
         if self._env is not None:
             try:
                 self._env.close()
-            except Exception:  # noqa: BLE001 - 关闭失败不该影响批次收尾
+            except Exception:  # noqa: BLE001 关闭失败不该影响批次收尾
                 pass
         self._env = None
         self._env_task_id = None
@@ -221,15 +225,13 @@ class LiberoAdapter:
 
     # ---- 观测转换 ----
 
-    @staticmethod
-    def to_state(obs: dict[str, Any]) -> np.ndarray:
+    def to_state(self, obs: dict[str, Any]) -> np.ndarray:
         """8D proprio：eef_pos(3) + axis_angle(3) + gripper_qpos(2)。"""
         gripper = np.asarray(obs["robot0_gripper_qpos"], dtype=np.float32).reshape(-1)
         if gripper.size == 0:
             gripper = np.zeros(2, dtype=np.float32)
         elif gripper.size == 1:
             gripper = np.repeat(gripper, 2)
-
         return np.concatenate(
             [
                 np.asarray(obs["robot0_eef_pos"], dtype=np.float32).reshape(3),
@@ -238,13 +240,11 @@ class LiberoAdapter:
             ]
         ).astype(np.float64)
 
-    @staticmethod
-    def to_images(obs: dict[str, Any]) -> dict[str, np.ndarray]:
-        """LIBERO 离屏渲染是上下颠倒的，必须 [::-1, ::-1] 才匹配训练分布。
+    def to_images(self, obs: dict[str, Any]) -> dict[str, np.ndarray]:
+        """LIBERO 离屏渲染上下颠倒，必须 [::-1,::-1] 才匹配训练分布。
 
-        坑：`libero_sim_node.py` 那个雏形不翻，是因为它的 obs 来自 server.py（那边
-        已经翻过）。本节点直接读 env，翻转就必须自己做，否则策略看到的是倒立世界，
-        分数会安静地烂掉。
+        坑：libero_sim_node.py 那个雏形不翻，是因为它的 obs 来自 server.py（已翻过）。
+        本节点直接读 env，翻转必须自己做，否则策略看到倒立世界，分数安静地烂掉。
         """
         return {
             "image/main": np.ascontiguousarray(
