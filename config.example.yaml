@@ -37,3 +37,8 @@ send_instruction: true
 
 result_dir: results/benchmark
 record_dir: null               # 非空则每 episode 落 mp4（暂未实现）
+
+# 服务模式（默认关闭，保持 autorun 兼容）：
+# serve: true
+# max_total_episodes: 0          # 0 = 不限制；serve 模式的单次 bench.run 护栏
+# max_max_steps: 0               # 0 = 不限制；serve 模式的单次 bench.run 护栏

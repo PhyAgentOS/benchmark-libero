@@ -517,3 +517,75 @@ pyproject.toml               包声明；LIBERO/robosuite 刻意不写进依赖�
 - 启动竞态：`start` 命令与首帧观测走不同通道且无 ack，靠通道投递顺序侥幸成立
 - 预热步在 `use_delta` 设置**之前**执行，`control_mode: absolute` 时预热用的是默认 delta 语义（当前预热动作全 0 所以无害）
 - 无启动自检：分辨率 / proprio 维度 / 别名与 checkpoint 的交叉核对尚未实现
+
+
+## 10. Serve 模式与独立 Node Bundle
+
+本节点支持两种运行方式：
+
+- serve: false（默认）：保持原有 autorun 行为，读取一次配置、完成一批 episode 后退出。
+- serve: true：启动常驻 benchmark 服务，等待 bench_cmd，每条 run 命令创建独立 invocation，完成后回到 idle，进程和 LIBERO runtime 保持存活。
+
+serve 模式的通道契约：
+
+    bench_cmd    endpoint -> libero_benchmark
+    bench_report libero_benchmark -> endpoint
+    action       policy -> libero_benchmark
+
+bench_cmd 使用 JSON（线协议版本由 runtime 校验），支持：
+
+    {"type": "describe"}
+    {"type": "run", "invocation_id": "inv-1",
+     "plan": {"task_ids": [0], "init_state_ids": [0], "num_runs": 1, "seed": 0}}
+    {"type": "cancel", "invocation_id": "inv-1"}
+
+bench_report 会报告 capabilities、accepted、progress、heartbeat、rejected 和 result。
+一次运行的终态 result 包含：
+
+- status
+- primary_metric
+- success_rate
+- successes
+- total_episodes
+- completed_episodes
+- result_path
+- episode 的 task_id、init_state_id、run_index、episode_seed、success、termination
+
+num_steps 是诊断字段；真实 LINGBOT-VA 已验证存在 run-to-run nondeterminism，不应单独作为 Skill 等价性的判定字段。
+
+### 10.1 构建独立 Node
+
+在仓库根目录执行：
+
+    ./scripts/build_pyinstaller.sh
+
+输出：
+
+    dist/libero_benchmark
+
+构建脚本使用 PyInstaller one-file，并收集本节点的 _core、LIBERO、robosuite、MuJoCo Python 模块、Dora、Forge messages 和必要的 package data。构建时不需要访问其他 Forge checkout。
+
+节点不包含 LINGBOT policy 或 checkpoint。大体积 LIBERO scene/object assets 作为宿主 runtime asset 提供，通过标准 LIBERO 配置定位；不要把模型或私人机器路径提交到仓库。
+
+### 10.2 宿主环境
+
+运行 headless LIBERO 时需要：
+
+    export MUJOCO_GL=egl
+    export PYOPENGL_PLATFORM=egl
+
+宿主需要可用的 EGL/OpenGL 驱动（包括 libEGL / libGL 及对应 vendor driver）和正式部署的 LIBERO assets。benchmark Node 本身不依赖 CUDA；GPU/CUDA 由独立 policy Node 按其配置使用。
+
+构建完成后可从任意临时目录执行：
+
+    unset PYTHONPATH
+    /tmp/libero_benchmark
+
+确认 executable 不依赖源码 checkout、私人 Python 路径或外部 PYTHONPATH。
+
+### 10.3 兼容性与故障排查
+
+- BENCH_NOT_READY：等待 benchmark 初始化后重新执行 describe，不要修改 runtime manager。
+- HTTP 503 / operation concurrency ... exhausted：当前 invocation 仍在执行；请求应立即拒绝，不排队、不创建第二个 benchmark execution。
+- startup timeout：确认 PAOS profile 的 startup_timeout_s 足以覆盖 LIBERO/MuJoCo 初始化时间。
+- result_path：以 bench_report 的终态 result 为准；不要只根据 accepted 判断 benchmark 已完成。
