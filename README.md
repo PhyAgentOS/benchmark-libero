@@ -589,3 +589,46 @@ num_steps 是诊断字段；真实 LINGBOT-VA 已验证存在 run-to-run nondete
 - HTTP 503 / operation concurrency ... exhausted：当前 invocation 仍在执行；请求应立即拒绝，不排队、不创建第二个 benchmark execution。
 - startup timeout：确认 PAOS profile 的 startup_timeout_s 足以覆盖 LIBERO/MuJoCo 初始化时间。
 - result_path：以 bench_report 的终态 result 为准；不要只根据 accepted 判断 benchmark 已完成。
+
+## 11. 两个独立 Forge Node
+
+本仓库同时提供两个职责独立、可分别测试和构建的 Node：
+
+- `libero_benchmark`：负责 LIBERO 仿真环境、episode 生命周期、评估和结果落盘。
+- `bench_endpoint`：通过 Forge Tool endpoint 对外暴露 `bench.describe`（Query）和
+  `bench.run`（Action），并把调用转发给正在运行的 benchmark Node。
+
+二者不是同一个 Node；联调时的调用链为：
+
+    Gateway → bench_endpoint → libero_benchmark ↔ policy → result
+
+### 11.1 bench_endpoint Node
+
+源码位于 `bench_endpoint/`，包含独立的 Python package、37 个单元测试和
+PyInstaller one-file 构建脚本。它使用 Forge endpoint protocol
+`forge.tool.endpoint/v1alpha1`，保持 Query/Action 语义和 invocation 的
+accepted/running/completed 生命周期，不引入 Session。
+
+运行测试：
+
+    PYTHONPATH=bench_endpoint/src:<forge-gateway-src>/src python -m pytest -q bench_endpoint/tests
+
+构建（Gateway 源码是显式的构建时输入，须使用已兼容的 Gateway revision）：
+
+    ./bench_endpoint/scripts/build_pyinstaller.sh --forge-gateway-src <forge-gateway-checkout>
+
+输出为 `bench_endpoint/dist/bench_endpoint`。构建产物不提交到 Git；发布时可将该
+可执行文件单独归档为根目录只有 `bench_endpoint` 的 tar.gz。运行时需要与
+benchmark Node 连接的 Gateway/Dora 通道 `bench_endpoint_request` /
+`bench_endpoint_response`，以及 benchmark Node 提供的 `bench_cmd` /
+`bench_report`。
+
+最小调用参数示例：
+
+    {"task_ids": [0], "init_state_ids": [0], "num_runs": 1, "seed": 0}
+
+先调用 `bench.describe` 获取 live capabilities，再构造 `bench.run`；accepted
+只表示 invocation 已接收，最终结果必须读取 status/result。结果中的
+`primary_metric`、`success_rate`、`successes`、`total_episodes`、
+`completed_episodes` 和 `result_path` 均由 benchmark Node 负责计算和报告，
+endpoint/agent 不自行判分或跨 invocation 聚合。
