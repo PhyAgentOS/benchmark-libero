@@ -3,3 +3,6 @@ smoke*.yaml
 dataflow_stub*.yaml
 stub_policy.py
 __pycache__/
+dist/
+build/
+.venv_build/
