@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """LIBERO benchmark 节点（Dora）。
 
-两节点架构：本节点进程内持有 LIBERO env，与不改动的 policy 节点经 dora 通信。
-批次调度、锁步、落盘全在 _core 里，本文件只负责组装。
+本节点进程内持有 LIBERO env 与 Forge session endpoint，与不改动的 policy 节点
+经 dora 通信。批次调度、锁步、落盘全在 _core 里，本文件只负责组装。
 """
 
 from __future__ import annotations
@@ -37,6 +37,11 @@ def main() -> int:
     cfg = load_config(config_path)
     _log(f"layout_mode={cfg.layout_mode} camera={cfg.camera_height}x{cfg.camera_width}")
     adapter = LiberoAdapter(cfg)
+    if getattr(cfg, "serve", False):
+        # 延迟导入：autorun 不需要 forge_tool，serve 才要
+        from bench_tool.node import run_serve_tool  # noqa: E402
+
+        return run_serve_tool(cfg, adapter, log=_log)
     return run_node(cfg, adapter, log=_log)
 
 

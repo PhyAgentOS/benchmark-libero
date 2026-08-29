@@ -8,6 +8,7 @@ NODE_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 DIST_DIR=$NODE_ROOT/dist
 WORK_DIR=$NODE_ROOT/build/pyinstaller
 PYTHON_BIN=${PYTHON_BIN:-python3.12}
+VERSION=1.0.0
 
 if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
     echo "ERROR: python3.12 was not found; set PYTHON_BIN in this script or invoke it with a compatible shell" >&2
@@ -17,7 +18,7 @@ fi
 "$PYTHON_BIN" - <<'PY'
 import importlib
 
-for name in ("libero", "robosuite", "mujoco", "dora", "forge_msgs", "pyarrow", "scipy", "numba"):
+for name in ("libero", "robosuite", "mujoco", "dora", "forge_msgs", "forge_tool", "pyarrow", "scipy", "numba"):
     importlib.import_module(name)
     print(f"build dependency available: {name}")
 PY
@@ -36,7 +37,8 @@ echo "==> creating isolated PyInstaller environment"
     --no-input \
     pyinstaller==6.19.0 \
     dora-rs==0.4.1 \
-    forge-msgs==1.0.1 \
+    forge-msgs==1.2.0 \
+    forge-tool==1.0.0 \
     pyarrow==23.0.1 \
     pydantic==2.12.5 \
     pyyaml==6.0.3
@@ -60,5 +62,21 @@ if [[ ! -x "$DIST_FILE" ]]; then
     exit 1
 fi
 
-echo "==> build successful: $DIST_FILE"
-ls -lh "$DIST_FILE"
+echo "==> staging tarball (single entrypoint: libero_benchmark)"
+STAGE_DIR=$(mktemp -d /tmp/libero_benchmark_stage.XXXXXX)
+cp "$DIST_FILE" "$STAGE_DIR/libero_benchmark"
+TARBALL="$DIST_DIR/libero_benchmark-${VERSION}-linux-x86_64.tar.gz"
+tar -czf "$TARBALL" -C "$STAGE_DIR" libero_benchmark
+rm -rf "$STAGE_DIR"
+
+# 单 entrypoint 断言：包里必须恰好一个根条目，名字就是 entrypoint。
+# 发布前最后一道闸 —— 包结构不对会直接阻断发布。
+ROOT_ENTRIES=$(tar -tzf "$TARBALL")
+if [[ "$ROOT_ENTRIES" != "libero_benchmark" ]]; then
+    echo "ERROR: tarball must contain exactly one root entry 'libero_benchmark', got: $ROOT_ENTRIES" >&2
+    exit 1
+fi
+
+echo "==> build successful: $TARBALL"
+ls -lh "$TARBALL"
+sha256sum "$TARBALL"

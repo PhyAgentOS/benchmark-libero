@@ -1,11 +1,12 @@
 [project]
 name = "forge-benchmark-libero"
-version = "0.1.0"
+version = "1.0.0"
 description = "Standalone LIBERO benchmark node for Forge"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "dora-rs==0.4.1",
-    "forge-msgs",
+    "forge-msgs==1.2.0",
+    "forge-tool[dora]==1.0.0",
     "numpy",
     "pyarrow",
     "pyyaml>=6.0",
@@ -19,11 +20,8 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["tests", "_core/tests"]
+testpaths = ["tests", "_core/tests", "bench_tool/tests"]
 pythonpath = ["."]
 
 [tool.uv]
 package = false
-
-[tool.uv.sources]
-forge-msgs = { git = "https://gitlab.ex-ai.cn/PhyAgentOS/framework/forge.git", subdirectory = "packages/msgs", rev = "83be2093b80310c438fa8f1d0d9a593123469d7d" }

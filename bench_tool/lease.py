@@ -1,3 +1,10 @@
+"""注册租约（逐字移植自 bench_endpoint/endpoint_lease.py，endpoint_id 变了）。
+
+forge_tool 的租约语义：注册回执里带 lease_ttl_ms，在 ttl/3 处重注册一次。
+注册/续租/注销都是 ToolEnvelope，走 tool_out 通道；registry.response 必须
+回 acknowledge，否则 gateway 起得来但 tool 永远 not ready，而且不报任何错。
+"""
+
 from __future__ import annotations
 
 import uuid

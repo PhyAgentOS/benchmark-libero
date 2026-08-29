@@ -1,13 +1,15 @@
-"""一次 bench.run 的状态表。
+"""一次 benchmark.controller/run session 的状态表。
 
-**不变式(handler 依赖它,破了会在 forge_tool 内部抛)**:
-只要 `status()` 返回的 phase 是终态,`result()` 就必须能给出 available 的
-ToolResult,且两者按 `validate_execution_result` 的映射对齐:
+**不变式（handler 依赖它，破了会在 forge_tool 内部抛）**：
+只要 `status()` 返回的 phase 是终态，`result()` 就必须能给出 available 的
+ToolResult，且两者按 `validate_execution_result` 的映射对齐：
 
     completed → succeeded    failed → failed
-    cancelled → cancelled    unknown → unknown
+    stopped → stopped        unknown → unknown
 
-所以这里把 phase 和 result **成对写入**,不提供只改其中一个的接口。
+所以这里把 phase 和 result **成对写入**，不提供只改其中一个的接口。
+（移植自 bench_endpoint/invocations.py：_TERMINAL 去掉 cancelled、新增
+stopped，cancel_requested 改 stop_requested，新增 mark_stopping。）
 """
 
 from __future__ import annotations
@@ -29,15 +31,15 @@ from .descriptor import ERR_UNKNOWN_INVOCATION, tool_error
 
 logger = logging.getLogger(__name__)
 
-# phase → ToolResult.status,与 forge_tool 的 _TERMINAL_PHASE_RESULTS 一致
+# phase → ToolResult.status，与 forge_tool 的 _TERMINAL_PHASE_RESULTS 一致
 _TERMINAL = {
     "completed": "succeeded",
     "failed": "failed",
-    "cancelled": "cancelled",
+    "stopped": "stopped",
     "unknown": "unknown",
 }
 
-# 留几条历史。够 Agent 对账即可 —— 留多了没用,Agent 不会回头看上上次。
+# 留几条历史。够 Agent 对账即可 —— 留多了没用，Agent 不会回头看上上次。
 DEFAULT_RETENTION = 8
 
 
@@ -48,7 +50,7 @@ class Invocation:
     phase: str = "accepted"
     result: ToolResult | None = None
     details: dict[str, Any] = field(default_factory=dict)
-    cancel_requested: bool = False
+    stop_requested: bool = False
 
     @property
     def terminal(self) -> bool:
@@ -56,8 +58,8 @@ class Invocation:
 
     def status(self) -> ToolExecutionStatus:
         error = self.result.error if (self.result is not None and self.result.error) else None
-        # ToolExecutionStatus 的校验:只有 failed/unknown 允许带 error,
-        # 其余带了就抛。所以这里必须按 phase 过滤,不能无脑透传。
+        # ToolExecutionStatus 的校验：只有 failed/unknown 允许带 error，
+        # 其余带了就抛。所以这里必须按 phase 过滤，不能无脑透传。
         if self.phase not in ("failed", "unknown"):
             error = None
         elif error is None:
@@ -90,12 +92,12 @@ class InvocationTable:
 
     def create(self, key: ToolExecutionKey, plan: dict[str, Any]) -> Invocation:
         if self.active() is not None:
-            raise RuntimeError("已有未终结的 invocation;调用方必须先拒掉")
+            raise RuntimeError("已有未终结的 invocation；调用方必须先拒掉")
         item = Invocation(key=key, plan=dict(plan), details={"phase_detail": "dispatched"})
         self._items[key.invocation_id] = item
         while len(self._items) > self._retention:
             oldest, _ = next(iter(self._items.items()))
-            # 只淘汰已终结的,免得把在跑的那条挤掉
+            # 只淘汰已终结的，免得把在跑的那条挤掉
             victim = self._items[oldest]
             if not victim.terminal:
                 break
@@ -107,6 +109,15 @@ class InvocationTable:
         if item is None or item.terminal:
             return
         item.phase = "running"
+        if details:
+            item.details.update(details)
+
+    def mark_stopping(self, invocation_id: str, details: dict[str, Any] | None = None) -> None:
+        """stopping 是唯一的中间相位：stop 已收下，批次在 episode 边界落停。"""
+        item = self._items.get(invocation_id)
+        if item is None or item.terminal:
+            return
+        item.phase = "stopping"
         if details:
             item.details.update(details)
 
@@ -133,12 +144,9 @@ class InvocationTable:
             return
         if item.terminal:
             # 已经终结了还收到终态 —— 按协议不能改写，但**必须吼一声**：
-            # 最常见的成因是心跳阈值太紧，把正常的长阻塞误判成掉线，于是真结果
-            # 到达时被丢掉，而仿真器其实跑完了、result.json 也落盘了。
             # 静默返回的话这种劈叉永远查不出来。
             logger.warning(
-                "invocation %s 已是终态 %s，丢弃迟到的 %s 回执"
-                "（多半是 heartbeat_timeout_s 设得太小）",
+                "invocation %s 已是终态 %s，丢弃迟到的 %s 回执",
                 invocation_id,
                 item.phase,
                 phase,
@@ -171,8 +179,8 @@ class InvocationTable:
     def result_for(self, key: ToolExecutionKey) -> ToolResultResponse:
         item = self.get(key)
         if item is None:
-            # 刻意不用 not_found:上面的 status_for 已经把未知 key 报成终态
-            # unknown 了,handler 会立刻来要结果,此时返回 not_found 就自相矛盾。
+            # 刻意不用 not_found：上面的 status_for 已经把未知 key 报成终态
+            # unknown 了，handler 会立刻来要结果，此时返回 not_found 就自相矛盾。
             return ToolResultResponse(
                 status="available",
                 result=ToolResult(

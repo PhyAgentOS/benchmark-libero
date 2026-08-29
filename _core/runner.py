@@ -70,6 +70,12 @@ class BenchmarkRunner:
         self.obs_sent_at: float | None = None
         self.latencies: list[float] = []
         self.finished = False
+        # serve 模式的停止请求：置位后当前 episode 跑完就不再开下一集，批次以
+        # stopped 收尾（已有完成集作 partial）。消费点在 start_next_episode。
+        self.stop_requested = False
+        self.stop_reason: str | None = None
+        # finish() 时带上的摘要；endpoint 的七字段输出读它。
+        self.failure_summary: str | None = None
         # finish() 里 dump() 的最终落盘路径。只做记录，不参与判分。
         self.result_path: str | None = None
 
@@ -111,6 +117,14 @@ class BenchmarkRunner:
 
     # ---- episode 推进 ----
 
+    def request_stop(self, reason: str | None = None) -> None:
+        """请求在 episode 边界停，不在动作中途停 —— episode 判分要求环境状态
+        干净，中途掐掉会让当前集半途而废（那才是数据污染）。"""
+        if self.finished:
+            return
+        self.stop_requested = True
+        self.stop_reason = reason
+
     def advance(self) -> None:
         """推进到下一 episode。任何异常都收敛成"批次失败"，绝不冲出事件循环。"""
         if self.finished:
@@ -119,12 +133,18 @@ class BenchmarkRunner:
             self.start_next_episode()
         except Exception as exc:  # noqa: BLE001
             self._log(f"启动下一 episode 失败：{type(exc).__name__}: {exc}")
-            self.finish("failed")
+            self.finish("failed", failure_summary=f"启动下一 episode 失败：{type(exc).__name__}: {exc}")
 
     def start_next_episode(self) -> bool:
         self.plan_index += 1
         if self.plan_index >= len(self.plan):
             self.finish("succeeded")
+            return False
+
+        # stop 的消费点：边界到了就不再开下一集，批次以 stopped 收尾。
+        # 已有完成集会在 result 里,由 endpoint 转成 partial 输出。
+        if self.stop_requested:
+            self.finish("stopped", failure_summary=self.stop_reason)
             return False
 
         task_id, init_state_id, run_index = self.plan[self.plan_index]
@@ -267,10 +287,11 @@ class BenchmarkRunner:
 
     # ---- 批次收尾 ----
 
-    def finish(self, status: str) -> None:
+    def finish(self, status: str, failure_summary: str | None = None) -> None:
         if self.finished:
             return
         self.finished = True
+        self.failure_summary = failure_summary
         self.result.status = status
         self.result.elapsed_s = time.time() - self.started_at
 
