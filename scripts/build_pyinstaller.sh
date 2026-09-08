@@ -40,6 +40,7 @@ echo "==> creating isolated PyInstaller environment"
     forge-msgs==1.2.0 \
     forge-tool==1.0.0 \
     pyarrow==23.0.1 \
+    numpy==2.2.6 \
     pydantic==2.12.5 \
     pyyaml==6.0.3
 
