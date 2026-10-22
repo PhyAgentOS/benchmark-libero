@@ -33,6 +33,32 @@ benchmark 节点（本节点）                     policy 节点（不改）
 
 ---
 
+## Node、Endpoint 与 Tool API / Capability summary
+
+| 项目 | 当前实现 |
+| --- | --- |
+| 生产 Node | 1：`libero_benchmark`；源码入口 `main.py`，打包入口 `dist/libero_benchmark` |
+| Tool 支持 | `serve: true` 时，本 Node 直接提供 Endpoint；默认 autorun 不注册 Endpoint |
+| Endpoint 数 | serve 模式为 1：`benchmark.controller` |
+| operation 数 | 2：`describe`（Query）、`run`（Session，可 stop、可查状态；各自最大并发 1） |
+| 直接 HTTP Tool API | 0；Dora `tool_in/tool_out` 连接 Gateway |
+| Gateway Tool 数 | 由 Skill/Gateway 的 `tools.specs` 决定；不能将 2 个 operation 直接当作仓库固定的 2 个 Tool |
+
+| Tool ID | Endpoint / operation | provider |
+| --- | --- | --- |
+| 在 `tools.specs` 配置 | `benchmark.controller / describe`（Query） | serve 模式的 `libero_benchmark` |
+| 在 `tools.specs` 配置 | `benchmark.controller / run`（Session） | 同一 Node |
+
+当前源码不包含独立的 `bench_endpoint` Node，也不以旧的 `bench_cmd/bench_report` 协议接收 Tool 请求。
+Session run 的停止在 episode 边界落地；stop 受理不等于批次已结束，最终结果以 invocation result 为准。
+
+实现：[main.py](main.py)、[descriptor](bench_tool/descriptor.py)、
+[Endpoint 方法](bench_tool/endpoints.py)、[Dora loop](bench_tool/node.py)。
+
+兼容性：当前依赖声明为 `dora-rs==0.4.1`、`forge-msgs==1.2.0`、`forge-tool[dora]==1.0.0`；以 [pyproject.toml](pyproject.toml) 与 [uv.lock](uv.lock) 为准。 这些声明不构成跨版本互操作保证；使用制品时还需核对 build revision 和 Skill lock。
+
+后续修改 Node 入口、Endpoint 或 Tool API 时，请同步更新本节及对应配置/契约，遵循 [Node README 规范](https://github.com/PhyAgentOS/forge/blob/master/CONTRIBUTING.md#node-readme-contract)。
+
 ## 1. 环境
 
 ### 1.1 占位符约定
@@ -521,37 +547,19 @@ pyproject.toml               包声明；LIBERO/robosuite 刻意不写进依赖�
 
 ## 10. Serve 模式与独立 Node Bundle
 
-本节点支持两种运行方式：
+本节点支持两种运行方式，均由同一个 `main.py` / `libero_benchmark` 入口选择：
 
-- serve: false（默认）：保持原有 autorun 行为，读取一次配置、完成一批 episode 后退出。
-- serve: true：启动常驻 benchmark 服务，等待 bench_cmd，每条 run 命令创建独立 invocation，完成后回到 idle，进程和 LIBERO runtime 保持存活。
+- `serve: false`（默认）：autorun，完成配置中的一批 episode 后退出。
+- `serve: true`：常驻 Node，直接注册 `benchmark.controller`，提供 `describe` Query 和 `run` Session。
 
-serve 模式的通道契约：
+serve 模式将 Gateway provider 输出接到本 Node 的 `tool_in`，将本 Node 的 `tool_out`
+接回 Gateway provider 输入。保留 `action` 输入，以及策略所需观测、图像与 `policy_command` 数据流。
+`bench_tool/node.py` 在同一进程中组合 Endpoint handler 和评测循环，不需要独立 Endpoint Node。
 
-    bench_cmd    endpoint -> libero_benchmark
-    bench_report libero_benchmark -> endpoint
-    action       policy -> libero_benchmark
-
-bench_cmd 使用 JSON（线协议版本由 runtime 校验），支持：
-
-    {"type": "describe"}
-    {"type": "run", "invocation_id": "inv-1",
-     "plan": {"task_ids": [0], "init_state_ids": [0], "num_runs": 1, "seed": 0}}
-    {"type": "cancel", "invocation_id": "inv-1"}
-
-bench_report 会报告 capabilities、accepted、progress、heartbeat、rejected 和 result。
-一次运行的终态 result 包含：
-
-- status
-- primary_metric
-- success_rate
-- successes
-- total_episodes
-- completed_episodes
-- result_path
-- episode 的 task_id、init_state_id、run_index、episode_seed、success、termination
-
-num_steps 是诊断字段；真实 LINGBOT-VA 已验证存在 run-to-run nondeterminism，不应单独作为 Skill 等价性的判定字段。
+调用者先使用 `describe` 获取能力，再提交 `run`。Session 使用 stop，停止在 episode 边界生效；
+accepted/stop accepted 都不是终态。结果包含 primary_metric、success_rate、successes、
+total_episodes、completed_episodes、result_path 和 episode 明细，具体形状见
+[结果组装](bench_tool/result_shape.py)。
 
 ### 10.1 构建独立 Node
 
@@ -588,47 +596,16 @@ num_steps 是诊断字段；真实 LINGBOT-VA 已验证存在 run-to-run nondete
 - BENCH_NOT_READY：等待 benchmark 初始化后重新执行 describe，不要修改 runtime manager。
 - HTTP 503 / operation concurrency ... exhausted：当前 invocation 仍在执行；请求应立即拒绝，不排队、不创建第二个 benchmark execution。
 - startup timeout：确认 PAOS profile 的 startup_timeout_s 足以覆盖 LIBERO/MuJoCo 初始化时间。
-- result_path：以 bench_report 的终态 result 为准；不要只根据 accepted 判断 benchmark 已完成。
+- result_path：以 Tool invocation 的终态 result 为准；不要只根据 accepted 判断 benchmark 已完成。
 
-## 11. 两个独立 Forge Node
+## 11. Endpoint 与部署版本
 
-本仓库同时提供两个职责独立、可分别测试和构建的 Node：
+当前源码的 provider 是 serve 模式下的 `libero_benchmark` 本身，Endpoint descriptor 为
+[`benchmark.controller`](bench_tool/descriptor.py)，其中 `run` 使用 Session 语义。
+仓库没有 `bench_endpoint/` 目录，也不构建 `bench_endpoint` 可执行文件。
 
-- `libero_benchmark`：负责 LIBERO 仿真环境、episode 生命周期、评估和结果落盘。
-- `bench_endpoint`：通过 Forge Tool endpoint 对外暴露 `bench.describe`（Query）和
-  `bench.run`（Action），并把调用转发给正在运行的 benchmark Node。
+历史的独立 Endpoint、Query/Action 或 `bench_cmd/bench_report` 组装说明不能用来配置本版本。
+使用当前源码时，应为 Gateway 配置 Query/Session ToolSpec 和 provider 通道，保持 Gateway、
+`forge-tool`、`forge-msgs`、Dora 与消费方版本兼容；源码能力不代表历史 Skill 锁定二进制的能力。
 
-二者不是同一个 Node；联调时的调用链为：
-
-    Gateway → bench_endpoint → libero_benchmark ↔ policy → result
-
-### 11.1 bench_endpoint Node
-
-源码位于 `bench_endpoint/`，包含独立的 Python package、37 个单元测试和
-PyInstaller one-file 构建脚本。它使用 Forge endpoint protocol
-`forge.tool.endpoint/v1alpha1`，保持 Query/Action 语义和 invocation 的
-accepted/running/completed 生命周期，不引入 Session。
-
-运行测试：
-
-    PYTHONPATH=bench_endpoint/src:<forge-gateway-src>/src python -m pytest -q bench_endpoint/tests
-
-构建（Gateway 源码是显式的构建时输入，须使用已兼容的 Gateway revision）：
-
-    ./bench_endpoint/scripts/build_pyinstaller.sh --forge-gateway-src <forge-gateway-checkout>
-
-输出为 `bench_endpoint/dist/bench_endpoint`。构建产物不提交到 Git；发布时可将该
-可执行文件单独归档为根目录只有 `bench_endpoint` 的 tar.gz。运行时需要与
-benchmark Node 连接的 Gateway/Dora 通道 `bench_endpoint_request` /
-`bench_endpoint_response`，以及 benchmark Node 提供的 `bench_cmd` /
-`bench_report`。
-
-最小调用参数示例：
-
-    {"task_ids": [0], "init_state_ids": [0], "num_runs": 1, "seed": 0}
-
-先调用 `bench.describe` 获取 live capabilities，再构造 `bench.run`；accepted
-只表示 invocation 已接收，最终结果必须读取 status/result。结果中的
-`primary_metric`、`success_rate`、`successes`、`total_episodes`、
-`completed_episodes` 和 `result_path` 均由 benchmark Node 负责计算和报告，
-endpoint/agent 不自行判分或跨 invocation 聚合。
+评测分数和结果由 benchmark Node 产生；Gateway/agent 不代替其判分，也不跨 invocation 聚合。
