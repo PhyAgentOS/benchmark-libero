@@ -1,195 +1,227 @@
-# LIBERO Benchmark 节点
+# LIBERO Benchmark Node
 
-把 LIBERO 包一层的 Dora 节点。进程内持有 LIBERO env，只做测评：批次展开 → 逐 episode 跑 → 结果落盘。
+[English](README.md) | [简体中文](README_zh.md)
 
+A Dora wrapper around LIBERO that owns its environment in-process and performs evaluation:
+expand a batch, run episodes and persist results.
+
+```text
+Benchmark Node (this repository)                 Policy Node (unchanged)
+  import libero; own env in-process
+  proprio_state / image/main / image/second ---> observation cache + tick inference
+  action <------------------------------------- 7D JointCommand
+  policy_command -----------------------------> start / set_instruction / reset_scene / stop
+  evaluate env.env._check_success()
+  benchmark_status (stream) / benchmark_result (end of batch)
 ```
-benchmark 节点（本节点）                     policy 节点（不改）
-├─ 进程内 import libero，直接持有 env
-├─ proprio_state / image/main / image/second ──观测──▶ 缓存 + tick 推理
-├─ action ◀────────────────────────────────────动作──  JointCommand 7D
-├─ policy_command ─────────────────────────────命令──▶ start / set_instruction / reset_scene / stop
-├─ 判定 env.env._check_success()
-└─ benchmark_status（流式）/ benchmark_result（批次末）
-```
 
-不经过 TargetWS、不经过 mujoco_sim。判定、动作、重置全走 LIBERO 官方接口。
-设计规范见《Benchmark 接入手册》v14（PhyAgentOS 文档库），本节点是它的参考实现。
+Evaluation, actions and resets use official LIBERO interfaces directly, without TargetWS or mujoco_sim.
+The repository identifies this as a reference implementation of the PhyAgentOS Benchmark Integration Guide v14.
 
-拆仓不改变 Dora 端口契约：
+Repository separation does not change the Dora port contract:
 
-- 输入：`action`，来源为 policy 的 7D `JointCommand`；
-- 输出：`proprio_state`（8D `JointState`）、`image/main`、`image/second`、
-  `policy_command`、`benchmark_status`、`benchmark_result`。
+- Input: `action`, a policy-generated 7D `JointCommand`.
+- Outputs: `proprio_state` (8D `JointState`), `image/main`, `image/second`,
+  `policy_command`, `benchmark_status`, `benchmark_result`.
 
-**已验证**（2026-08-16，完整 Forge 两节点）：
+**Historical repository results** (2026-08-16, complete Forge two-Node dataflow):
 
-| 策略 | suite | 结果 | 耗时 | 平均延迟 |
+| Policy | Suite | Result | Elapsed | Mean latency |
 |:---|:---|:---|---:|---:|
 | VLA-JEPA | libero_spatial | 4/4 | 20.0 s | 16.3 ms |
 | LingBot-VA | libero_10 | 2/2 | 128.7 s | 221 ms |
 
-两个策略结构完全不同（VLA-JEPA 有 `observation.state`，LingBot-VA 没有；chunk 7 vs 16；延迟差 13 倍），都跑通。
-更大样本（离线闭环，同一套 adapter）：VLA-JEPA 在 libero_spatial 100 episodes = **94%**（渲染 256）/ **96%**（渲染 224），对照 OpenVLA 的 84.7%。
+Both policy structures ran: VLA-JEPA has `observation.state`, LingBot-VA does not; chunk lengths are 7 vs 16,
+with approximately 13-fold latency difference. Larger offline runs using the same adapter reported
+VLA-JEPA libero_spatial success over 100 episodes of **94%** (rendering 256) / **96%** (rendering 224),
+compared with the cited OpenVLA baseline of 84.7%.
 
 ---
 
-## 1. 环境
+## Node, Endpoint and Tool API
 
-### 1.1 占位符约定
+| Item | Current implementation |
+| --- | --- |
+| Production Nodes | 1: `libero_benchmark`; source `main.py`, packaged entrypoint `dist/libero_benchmark` |
+| Tool support | Direct Endpoint provider with `serve: true`; default autorun registers no Endpoint |
+| Endpoints | 1 in serve mode: `benchmark.controller` |
+| Operations | 2: `describe` (Query), `run` (Session, stoppable, status supported; each has maximum concurrency 1) |
+| Direct HTTP Tool API | 0; Dora `tool_in/tool_out` connect to Gateway |
+| Gateway Tools | Defined by Skill/Gateway `tools.specs`; 2 operations do not imply 2 repository-fixed Tools |
 
-本文用以下占位符指代与部署机相关的路径，落地时替换成你自己的：
+| Tool ID | Endpoint / operation | Provider |
+| --- | --- | --- |
+| Configure in `tools.specs` | `benchmark.controller / describe` (Query) | `libero_benchmark` in serve mode |
+| Configure in `tools.specs` | `benchmark.controller / run` (Session) | The same Node |
 
-| 占位符 | 含义 |
+Current source has no independent `bench_endpoint` Node and does not receive Tool requests through legacy
+`bench_cmd/bench_report`. Session stop takes effect at an episode boundary; acceptance is not completion.
+Read the terminal invocation result for the final outcome.
+
+Implementation: [main.py](main.py), [descriptor](bench_tool/descriptor.py),
+[Endpoint methods](bench_tool/endpoints.py), [Dora loop](bench_tool/node.py).
+
+Compatibility: current dependency declarations are `dora-rs==0.4.1`, `forge-msgs==1.2.0`, `forge-tool[dora]==1.0.0`. See [pyproject.toml](pyproject.toml) and [uv.lock](uv.lock). These declarations do not guarantee cross-version interoperability; also check the build revision and Skill lock when using artifacts.
+
+Changes to Node entrypoints, Endpoints or Tool APIs must update this section and the associated configuration/contracts. Follow the [Node README contract](https://github.com/PhyAgentOS/forge/blob/master/CONTRIBUTING.md#node-readme-contract).
+
+## 1. Environment
+
+### 1.1 Path placeholders
+
+Replace the deployment-specific path placeholders below with your own locations:
+
+| Placeholder | Meaning |
 |:---|:---|
-| `$BENCH_PY` | 评测用 python 解释器的**绝对路径**（该环境须同时具备 libero / dora / forge_msgs / forge_policy / lerobot / torch+CUDA） |
-| `$DORA_BIN` | `dora` 命令行所在目录 |
-| `$LIBERO_NODE_ROOT` | 本仓库根目录 |
-| `$LEROBOT_RUNNER` | lerobot_runner 仓库根目录 |
-| `$MODELS` | 策略权重目录 |
-| `$WORK` | 存放本次评测三个配置文件的工作目录 |
-| `$PKG_LINK` | 给 policy 节点用的包软链目录（见 §2.2） |
+| `$BENCH_PY` | Absolute evaluation Python path; environment includes libero / dora / forge_msgs / forge_policy / lerobot / torch+CUDA |
+| `$DORA_BIN` | Directory containing the `dora` CLI |
+| `$LIBERO_NODE_ROOT` | This repository root |
+| `$LEROBOT_RUNNER` | LeRobot runner repository root |
+| `$MODELS` | Policy weights directory |
+| `$WORK` | Working directory containing the three evaluation configuration files |
+| `$PKG_LINK` | Package symlink directory for the policy Node; see section 2.2 |
 
-独立仓库：
+Standalone repository:
 
 ```bash
-git clone https://gitlab.ex-ai.cn/PhyAgentOS/framework/benchmark/libero.git
+git clone https://github.com/PhyAgentOS/benchmark-libero.git libero
 cd libero
 uv sync --all-groups
 uv run pytest -q
 ```
 
-`uv sync` 安装节点基础依赖；LIBERO/robosuite 和 policy 推理依赖仍由评测环境提供。
+`uv sync` installs base Node dependencies; the evaluation environment supplies LIBERO/robosuite and policy inference dependencies.
 
-### 1.2 两个环境的分工
+### 1.2 Two environment roles
 
-**一个环境未必同时具备节点依赖和 `dora` 命令行**，实测常见的情况是分在两处：
+Node dependencies and the `dora` CLI may live in separate environments:
 
-| 角色 | 要求 |
+| Role | Requirements |
 |:---|:---|
-| **节点运行环境**（`$BENCH_PY`） | 两个节点的 python 都用它。须有 libero / dora(python 模块) / forge_msgs / forge_policy / lerobot / torch+CUDA |
-| **`dora` CLI**（`$DORA_BIN`） | 只用来拉起 dataflow。**两边 dora 必须同版本**（如同为 0.4.1 / message 0.7.0），否则注册节点时报 version mismatch |
+| Node runtime (`$BENCH_PY`) | Both Nodes use this Python; install libero / dora module / forge_msgs / forge_policy / lerobot / torch+CUDA |
+| `dora` CLI (`$DORA_BIN`) | Launches the dataflow; CLI and Node Dora versions must match, e.g. 0.4.1 / message 0.7.0, or registration fails with version mismatch |
 
 ```bash
-export PATH=$DORA_BIN:$PATH     # 拉起用它
-# 节点里写 $BENCH_PY 的绝对路径（见 dataflow）
+export PATH=$DORA_BIN:$PATH     # Launcher CLI
+# Use the absolute $BENCH_PY path in Node configuration; see dataflow below
 ```
 
-自检：
+Check the environment:
 
 ```bash
 $BENCH_PY -c "import dora, forge_msgs, forge_policy, libero.libero, lerobot; print('ok')"
 dora --version
 ```
 
-依赖版本要求：
+Version requirements:
 
-| 包 | 版本 | 说明 |
+| Package | Version | Notes |
 |:---|:---|:---|
-| python | 3.12 | 不要用 3.8，理由见 §7 坑 7 |
-| dora-rs / dora-rs-cli | **两者必须同版本** | 混版本会在注册节点时报 version mismatch |
-| forge-msgs / forge-policy | — | `forge_policy` 提供 policy 节点的事件循环，处理 `policy_command` |
-| robosuite / mujoco | 1.4.0 + 3.x | robosuite 的三参数 `mj_fullM` 只有 mujoco 3.x 认 |
+| python | 3.12 | Avoid 3.8; see pitfall 7 in section 7 |
+| dora-rs / dora-rs-cli | Matching versions | Mixed versions fail Node registration |
+| forge-msgs / forge-policy | See locks | `forge_policy` supplies the policy event loop and handles `policy_command` |
+| robosuite / mujoco | 1.4.0 + 3.x | The three-argument `mj_fullM` used by robosuite requires MuJoCo 3.x |
 
-**策略权重建议全部本地化**到 `$MODELS`，并导 `HF_HUB_OFFLINE=1`，避免运行时依赖网络。来源见 §1.3。
+Download all weights to `$MODELS` and export `HF_HUB_OFFLINE=1` to avoid runtime network dependencies.
+Sources are listed in section 1.3.
 
 ---
 
-### 1.3 策略权重来源
+### 1.3 Policy weight sources
 
-全部来自 HuggingFace 官方仓库。**离线部署前先本地化下载到 `$MODELS` 并固定 revision**
-（`huggingface-cli download <repo> --revision <hash>`），运行时导 `HF_HUB_OFFLINE=1`。
+Sources below are official Hugging Face repositories. For offline deployment, download to `$MODELS`
+and pin revisions (`huggingface-cli download <repo> --revision <hash>`), then export `HF_HUB_OFFLINE=1`.
 
-**VLA-JEPA**（Qwen3-VL 骨干 + Flow-matching DiT 动作头）
+**VLA-JEPA** (Qwen3-VL backbone and flow-matching DiT action head)
 
-| 组件 | 下载地址 | HF repo id | 本地目录名 | 大小 | 许可证 |
+| Component | Download | HF repository ID | Local directory | Size | License |
 |:---|:---|:---|:---|---:|:---|
 | Policy checkpoint | https://huggingface.co/lerobot/VLA-JEPA-LIBERO | `lerobot/VLA-JEPA-LIBERO` | `vla_jepa_libero` | 5.8 G | Apache-2.0 |
-| Qwen3-VL 骨干 | https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct | `Qwen/Qwen3-VL-2B-Instruct` | `qwen3_vl_2b_instruct` | 4.0 G | Apache-2.0 |
-| V-JEPA2 编码器 | https://huggingface.co/facebook/vjepa2-vitl-fpc64-256 | `facebook/vjepa2-vitl-fpc64-256` | `vjepa2_vitl_fpc64_256` | 6.0 G | MIT |
+| Qwen3-VL backbone | https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct | `Qwen/Qwen3-VL-2B-Instruct` | `qwen3_vl_2b_instruct` | 4.0 G | Apache-2.0 |
+| V-JEPA2 encoder | https://huggingface.co/facebook/vjepa2-vitl-fpc64-256 | `facebook/vjepa2-vitl-fpc64-256` | `vjepa2_vitl_fpc64_256` | 6.0 G | MIT |
 
 ```bash
 huggingface-cli download lerobot/VLA-JEPA-LIBERO          --local-dir $MODELS/vla_jepa_libero
 huggingface-cli download Qwen/Qwen3-VL-2B-Instruct        --local-dir $MODELS/qwen3_vl_2b_instruct
-huggingface-cli download facebook/vjepa2-vitl-fpc64-256   --local-dir $MODELS/vjepa2_vitl_fpc64_256   # 推理可跳过
+huggingface-cli download facebook/vjepa2-vitl-fpc64-256   --local-dir $MODELS/vjepa2_vitl_fpc64_256   # Optional for inference
 ```
 
-> V-JEPA2 是**训练专用**的世界模型，推理不执行。配置里设 `enable_world_model: false`
-> 即可完全跳过加载，省 6 G 权重与显存——本节点的验收就是这么跑的。
-> 骨干与编码器的本地路径由 checkpoint 的 `qwen_model_name` / `jepa_encoder_name`
-> 引用，离线部署时在 policy 配置里显式指向 `$MODELS` 下的目录。
+> V-JEPA2 is a training-only world model, unused during inference. Set `enable_world_model: false`
+> to skip loading its 6 G of weights and associated GPU memory, as in the documented runs.
+> Checkpoint `qwen_model_name` / `jepa_encoder_name` reference the backbone/encoder paths;
+> explicitly override them with local `$MODELS` paths for offline use.
 
-**LingBot-VA**（纯视频-动作世界模型，无 `observation.state`）
+**LingBot-VA** (video-action world model without `observation.state`)
 
-| 组件 | 下载地址 | HF repo id | 本地目录名 | 大小 | 许可证 |
+| Component | Download | HF repository ID | Local directory | Size | License |
 |:---|:---|:---|:---|---:|:---|
-| Policy checkpoint | https://huggingface.co/lerobot/lingbot_va_libero_long | `lerobot/lingbot_va_libero_long` | `lingbot_va_libero_long` | 9.5 G | 见仓库 |
-| 冻结 Wan VAE + UMT5 | https://huggingface.co/robbyant/lingbot-va-base | `robbyant/lingbot-va-base` | `lingbot_va_base_frozen` | 14 G | 见仓库 |
+| Policy checkpoint | https://huggingface.co/lerobot/lingbot_va_libero_long | `lerobot/lingbot_va_libero_long` | `lingbot_va_libero_long` | 9.5 G | See repository |
+| Frozen Wan VAE + UMT5 | https://huggingface.co/robbyant/lingbot-va-base | `robbyant/lingbot-va-base` | `lingbot_va_base_frozen` | 14 G | See repository |
 
 ```bash
 huggingface-cli download lerobot/lingbot_va_libero_long --local-dir $MODELS/lingbot_va_libero_long
 huggingface-cli download robbyant/lingbot-va-base       --local-dir $MODELS/lingbot_va_base_frozen
 ```
 
-冻结目录必须含三个子目录：`text_encoder/`（UMT5，11 G）、`vae/`（Wan VAE，2.7 G）、`tokenizer/`（21 M）。
+The frozen directory must contain `text_encoder/` (UMT5, 11 G), `vae/` (Wan VAE, 2.7 G) and `tokenizer/` (21 M).
 
-> **坑**：checkpoint 的 `config.json` 里 `wan_pretrained_path` 写的是
-> `robbyant/lingbot-va-posttrain-libero-long`，那是个**在线 repo 路径**。离线跑必须在
-> policy 配置里用 `wan_pretrained_path` 覆盖成本地的 `$MODELS/lingbot_va_base_frozen`，
-> 否则会去联网拉取。
+> The checkpoint's `config.json` sets `wan_pretrained_path` to online repository
+> `robbyant/lingbot-va-posttrain-libero-long`. Override it with local
+> `$MODELS/lingbot_va_base_frozen` in the policy configuration or offline runs will attempt a network download.
 
-**其他策略的权重情况**（截至 2026-08-16）
+**Other policy weights** (repository status as of 2026-08-16)
 
-| 策略 | 状态 |
+| Policy | Status |
 |:---|:---|
-| ACT | 内部训练产物，需经 `lerobot convert` 转成 LeRobot 格式；无公开来源 |
-| Pi0.5 | 内部训练产物（`lerobot_trainer`）；另需本地 PaliGemma tokenizer |
-| Diffusion | 官方 LeRobot Hub 系列，如 `lerobot/diffusion_pusht` → https://huggingface.co/lerobot/diffusion_pusht （Apache-2.0）。**注意是 PushT 域**：2D state / 2D action / 96×96，**不能跑 LIBERO** |
+| ACT | Supplied training artifacts; convert with `lerobot convert`; no public checkpoint source specified |
+| Pi0.5 | Supplied training artifacts; also requires a local PaliGemma tokenizer |
+| Diffusion | Official LeRobot Hub, e.g. `lerobot/diffusion_pusht`: https://huggingface.co/lerobot/diffusion_pusht (Apache-2.0). PushT domain: 2D state/action and 96x96 images; not usable for LIBERO |
 
 ---
 
-## 2. 整体配置：三个文件，一张对应表
+## 2. Configuration: three files
 
-跑一次评测要三个文件，**它们之间有字段必须逐字对齐，对不上不报错、只掉分**：
+Evaluation uses three files whose matching fields must agree exactly. Mismatches may lower scores without errors:
 
+```text
+bench.yaml          Benchmark Node configuration; see config.example.yaml
+policy_xxx.yaml     LeRobot policy Node configuration
+dataflow.yaml       Dora topology connecting benchmark and policy
 ```
-bench.yaml          benchmark 节点配置（本节点的，见 config.example.yaml）
-policy_xxx.yaml     policy 节点配置（lerobot_runner 的）
-dataflow.yaml       dora 拓扑：两个节点怎么连
-```
 
-### 2.1 必须对齐的字段
+### 2.1 Fields that must match
 
-| 概念 | bench.yaml | policy_xxx.yaml | dataflow.yaml |
+| Concept | bench.yaml | policy_xxx.yaml | dataflow.yaml |
 |:---|:---|:---|:---|
-| **策略标识** | `policy_id` | `policy.policy_id` | — |
-| **相机通道** | （硬编码在 adapter，见 §9） | `image_inputs` 的**左键** | `inputs:` 里的通道名 |
-| **相机→模型特征** | — | `image_inputs` 的**右值** | — |
-| **proprio 关节名** | `config.py` 的 `STATE_JOINTS` | `state_joints` | — |
-| **动作关节** | — | `joints`（7 个） | — |
-| **渲染分辨率** | `camera_height/width` | （policy 内部自己 resize） | — |
-| **语言指令** | `send_instruction: true` | `policy.instruction`（会被逐 episode 覆盖） | — |
+| Policy identity | `policy_id` | `policy.policy_id` | — |
+| Camera channels | Hardcoded in adapter; section 9 | Left-side `image_inputs` keys | `inputs:` channel names |
+| Camera-to-feature mapping | — | Right-side `image_inputs` aliases | — |
+| Proprioceptive joint names | `STATE_JOINTS` in `config.py` | `state_joints` | — |
+| Action joints | — | `joints` (7) | — |
+| Render resolution | `camera_height/width` | Policy resizes internally | — |
+| Language instruction | `send_instruction: true` | `policy.instruction`, overwritten per episode | — |
 
-`policy_id` 对不上 → policy 忽略我们所有命令，整批用初始指令跑完。
-`image_inputs` 左键对不上通道名 → policy 收不到图。
-`STATE_JOINTS` 与 `state_joints` 对不上 → `JointState` 按名字查表**静默取到空值**。
+A mismatched `policy_id` makes the policy ignore commands and use its initial instruction for the entire batch.
+Mismatched `image_inputs` keys prevent image delivery. Mismatched `STATE_JOINTS` / `state_joints`
+make name-based `JointState` lookups silently return empty values.
 
-### 2.2 VLA-JEPA 的完整可用配置
+### 2.2 Complete VLA-JEPA configuration
 
 `bench.yaml`：
 
 ```yaml
 suite: libero_spatial
-task_ids: "0-1"                # all / "0-9" / "0,2-4,8" / [0,1,2]；留空=全集
+task_ids: "0-1"                # all / "0-9" / "0,2-4,8" / [0,1,2]; empty means all
 init_state_ids: "0-1"
 num_runs: 1
 max_steps: 300
 num_steps_wait: 10
 control_mode: relative
 seed: 0
-layout_mode: per_episode       # 见 §7 坑 1，换这个会改变分数
+layout_mode: per_episode       # Pitfall 1 in section 7; changing this changes scores
 camera_height: 256
 camera_width: 256
-policy_id: vla_jepa_libero     # ← 必须与 policy 配置一致
+policy_id: vla_jepa_libero     # Must match the policy configuration
 send_instruction: true
 result_dir: $WORK/results
 record_dir: null
@@ -198,22 +230,22 @@ record_dir: null
 `policy_vla_jepa.yaml`：
 
 ```yaml
-joints:                         # 动作 7 维
+joints:                         # 7 action dimensions
   - {name: joint1, mode: position, unit: radians}
-  # ... joint2..joint7 同理
-state_joints: [joint1, joint2, joint3, joint4, joint5, joint6, joint7, gripper]   # proprio 8 维
+  # ... configure joint2..joint7 similarly
+state_joints: [joint1, joint2, joint3, joint4, joint5, joint6, joint7, gripper]   # 8D proprioception
 
 policy:
   type: vla_jepa
-  policy_id: vla_jepa_libero    # ← 必须与 bench.yaml 一致
-  auto_start: false             # 由 benchmark 发 start
-  instruction: "..."            # 占位，会被逐 episode 覆盖
+  policy_id: vla_jepa_libero    # Must match bench.yaml
+  auto_start: false             # Benchmark sends start
+  instruction: "..."            # Placeholder; overwritten per episode
   device: cuda
-  enable_world_model: false     # 推理不需要 V-JEPA2，省显存
+  enable_world_model: false     # V-JEPA2 is unnecessary for inference
   pretrained_path: $MODELS/vla_jepa_libero
 
 image_inputs:
-  image/main: image             # 左=dora 通道名，右=checkpoint 特征名去掉 observation.images. 前缀
+  image/main: image             # Left: Dora channel; right: checkpoint feature without observation.images. prefix
   image/second: image2
 ```
 
@@ -237,398 +269,386 @@ nodes:
     path: $BENCH_PY
     args: -u -m lerobot_inference infer --config $WORK/policy_vla_jepa.yaml
     env:
-      PYTHONPATH: $PKG_LINK          # lerobot_inference 包（见下）
+      PYTHONPATH: $PKG_LINK          # lerobot_inference package; see below
       HF_HUB_OFFLINE: "1"
       CUDA_VISIBLE_DEVICES: "5"
     inputs:
       tick: dora/timer/millis/20
       policy_command:
         source: libero_benchmark/policy_command
-        queue_size: 32                # 必须显式加深，见 §7 坑 4
+        queue_size: 32                # Explicit depth required; pitfall 4 in section 7
       proprio_state: libero_benchmark/proprio_state
       image/main: libero_benchmark/image/main
       image/second: libero_benchmark/image/second
     outputs: [action, policy_command_status]
 ```
 
-**`PYTHONPATH=$PKG_LINK` 是必需的**：policy 节点的包名是 `lerobot_inference`，但仓库目录叫 `lerobot_runner`，要软链一次：
+**`PYTHONPATH=$PKG_LINK` is required:** the import name is `lerobot_inference`, while the checkout
+folder is named differently. Create its package symlink once:
 
 ```bash
 mkdir -p $PKG_LINK && ln -sfn $LEROBOT_RUNNER $PKG_LINK/lerobot_inference
 ```
 
-**dora 的 `path` 必须是绝对路径**，`~` 不展开；若 home 是软链，用 `readlink -f` 取真实路径。
+Dora `path` values must be absolute; `~` is not expanded. Resolve symlinked home paths with `readlink -f`.
 
-### 2.3 LingBot-VA 的差异
+### 2.3 LingBot-VA differences
 
-只有三处不同，其余照抄：
+Change these three policy fields; retain the remaining configuration:
 
 ```yaml
 policy:
   type: lingbot_va
   policy_id: lingbot_va_libero
   pretrained_path: $MODELS/lingbot_va_libero_long
-  # checkpoint 里的 wan_pretrained_path 指向 HF repo（本地缓存没有），必须覆盖：
+  # Override the checkpoint's online HF repository with a local frozen-weight directory
   wan_pretrained_path: $MODELS/lingbot_va_base_frozen
-# 无 state_joints —— LingBot-VA 是纯视频-动作模型，checkpoint 没有 observation.state
+# No state_joints: LingBot-VA is video-action only, without observation.state
 ```
 
-bench.yaml 里把 `suite` 改成 `libero_10`、`policy_id` 改成 `lingbot_va_libero`。
+In bench.yaml, set `suite` to `libero_10` and `policy_id` to `lingbot_va_libero`.
 
 ---
 
-## 3. 怎么跑
+## 3. Running
 
-### 3.1 stub 冒烟（验时序，不需要 GPU/策略）
+### 3.1 Stub smoke test: timing without GPU/policy weights
 
-stub 是个假 policy，只回空动作。**`success_rate` 恒为 0 是预期行为。**
+The fake policy returns empty actions. A constant `success_rate` of 0 is expected.
 
 ```bash
 export PATH=$DORA_BIN:$PATH
 cd $LIBERO_NODE_ROOT
-dora run dataflow_stub.yaml          # stub 不需要 GPU 与策略权重
+dora run dataflow_stub.yaml          # Stub needs neither GPU nor policy weights
 ```
 
-**要确认的四件事**（不是看跑完就算过）：
+Check all four properties, rather than just process completion:
 
-1. 每个 episode 的 `set_instruction` 内容**不一样**
-2. stub 退出时打印的 `obs == act`（1:1 锁步）
-3. `t/i/r` 索引与配置里的批次一致
-4. 结果 JSON 落盘且 `episodes[]` 条数 == `total_episodes`
+1. Each episode receives its own `set_instruction` content.
+2. The stub reports `obs == act` at exit (1:1 lockstep).
+3. `t/i/r` indices match the configured batch.
+4. Result JSON is persisted and `episodes[]` length equals `total_episodes`.
 
-### 3.2 真策略两节点（验口径，出真分数）
+### 3.2 Real-policy two-Node evaluation
 
 ```bash
 export PATH=$DORA_BIN:$PATH
-cd $WORK             # 三个配置文件所在目录
+cd $WORK             # Directory containing all three configuration files
 dora run dataflow.yaml
 ```
 
-`$WORK` 下需要三个文件：`bench.yaml` + `policy_<策略>.yaml` + `dataflow.yaml`，内容见 §2.2 / §2.3。
+`$WORK` needs `bench.yaml`, `policy_<policy>.yaml` and `dataflow.yaml`; see sections 2.2 / 2.3.
 
-**第一次接新 checkpoint 必须先小规模对基线**（2 task × 2 init-state），拿 `success_rate` 对已发表数字。stub 验的是时序，真策略验的是口径，两件事不能合并。
+Start each new checkpoint with a small baseline comparison (2 tasks x 2 initial states), comparing
+`success_rate` against published results. Stub testing checks timing; real-policy testing checks
+observation/action conventions. Neither replaces the other.
 
-### 3.3 接一个新 checkpoint 前必核三项
+### 3.3 Three checks for a new checkpoint
 
-错了都不报错，只会安静地掉分：
+These mismatches may silently reduce scores:
 
-| 项 | 怎么核 |
+| Item | Check |
 |:---|:---|
-| **proprio 语义** | **读 checkpoint 的归一化统计量**，别信配置里的文字描述。`observation.state` 的 min/mean/max 逐维量纲直接暴露它是关节角还是末端位姿 |
-| **相机别名** | policy 配置 `image_inputs` 左键要能对上我们的输出通道名 |
-| **分辨率** | 读 checkpoint `config.json`：有 `resize_images_to` 就喂原生分辨率（policy 自己缩）；没有才需要自己对齐 `input_features` |
+| Proprioceptive semantics | Read checkpoint normalization statistics, not YAML descriptions; per-dimension min/mean/max reveal joint-angle vs end-effector-pose units |
+| Camera aliases | Left-side `image_inputs` keys must match output channel names |
+| Resolution | Inspect checkpoint `config.json`; with `resize_images_to`, provide native resolution for policy-side resizing; otherwise match `input_features` |
 
-> 实例：VLA-JEPA 的 policy YAML 注释写 "observation.state 为 8 维（7 关节角 + gripper）"，**是错的**。归一化统计量显示它是 `eef_pos(3) + axis_angle(3) + gripper_qpos(2)`——第 3 维均值 0.79（LIBERO 桌面高度，米），第 4 维均值 2.98 ≈ π（夹爪朝下的 axis-angle），第 7/8 维完美对称正负小量（两根手指）。
+> Example: a VLA-JEPA YAML comment describing 8D state as seven joint angles plus gripper was incorrect.
+> Statistics indicate `eef_pos(3) + axis_angle(3) + gripper_qpos(2)`: dimension 3 mean 0.79 is tabletop
+> height in metres; dimension 4 mean 2.98 is approximately pi for downward orientation; dimensions 7/8
+> are symmetric opposite-sign finger values.
 
 ---
 
-## 4. 代码清单
+## 4. Code map
 
+```text
+main.py                      Entry assembly for the generic batch runner
+config.py                    Configuration, joint constants, validation and seed derivation
+result.py                    BenchmarkExecutionResultV1 assembly/persistence
+adapters/libero_adapter.py   LIBERO-specific implementation
+adapters/__init__.py         Empty
+config.example.yaml          Annotated configuration template
+dataflow.example.yaml        Real-policy dataflow template
+dataflow_stub.yaml           Git-ignored stub smoke fixture
+stub_policy.py               Git-ignored fake policy
+pyproject.toml               Package metadata; evaluation environment supplies LIBERO/robosuite
 ```
-main.py                      批次调度核心（通用，不认识 LIBERO）
-config.py                    配置模型 + 关节名常量 + 校验 + 种子派生
-result.py                    BenchmarkExecutionResultV1 组装与落盘
-adapters/libero_adapter.py   ★ LIBERO 特有的全部逻辑
-adapters/__init__.py         空
-config.example.yaml          配置模板（全字段带注释）
-dataflow.example.yaml        真策略 dataflow 模板
-dataflow_stub.yaml           stub 冒烟用（gitignored）
-stub_policy.py               假 policy（gitignored）
-pyproject.toml               包声明；LIBERO/robosuite 刻意不写进依赖，由评测环境提供
-```
 
-### 4.1 `main.py` — 批次调度核心
+### 4.1 `main.py`: batch orchestration
 
-**不认识 LIBERO**，换 benchmark 基本不动。
+The generic batch runner is benchmark-independent; the entrypoint assembles it with the LIBERO adapter.
 
-| 单元 | 职责 |
+| Unit | Responsibility |
 |:---|:---|
-| `BenchmarkRunner` | 持有批次计划与当前 episode 状态 |
-| `.start_next_episode()` | 取下一个 `(task, init_state, run)`；派生 episode 种子；发 `set_instruction` + `reset_scene`；调 adapter 重置；发首帧观测 |
-| `.on_action()` | 收到动作 → 校验有限性 → `env.step` → **每步判定** → 未结束就发下一帧观测 |
-| `.advance()` | 推进到下一 episode；**任何异常都收敛成"批次失败"**，绝不冲出事件循环 |
-| `._record_episode()` | 只记录，不推进（推进由调用方显式 `advance()`） |
-| `.fail_current()` | 异常路径的唯一入口：记为 failed 并推进 |
-| `.finish()` | 批次收尾。**落盘优先**于发消息和关 env |
-| `main()` | 加载配置 → 建 adapter → **fail fast 校验** → 建 Node → 事件循环，`finally` 里保证 `finish()` |
+| `BenchmarkRunner` | Batch plan and current episode state |
+| `.start_next_episode()` | Select next `(task, init_state, run)`, derive seed, send `set_instruction` / `reset_scene`, reset adapter and publish first observation |
+| `.on_action()` | Validate finite action, call `env.step`, check success every step and publish the next observation unless finished |
+| `.advance()` | Advance episodes; exceptions become batch failure rather than escaping the event loop |
+| `._record_episode()` | Record only; callers explicitly invoke `advance()` |
+| `.fail_current()` | Central exception path: record failure and advance |
+| `.finish()` | Persist before sending final messages or closing the environment |
+| `main()` | Load config, create/validate adapter, create Node, run event loop; guarantee `finish()` in `finally` |
 
-时序契约：**一次观测换一个动作**。发布观测后置 `awaiting_action=True`，收到 action 才 step。`awaiting_action=False` 时到达的多余 action **直接丢弃**（policy tick 通常快于我们步进）。action chunk 由 policy 内部排队，benchmark 不感知。
+Timing contract: one observation per action. Publishing sets `awaiting_action=True`; stepping waits
+for an action. Extra actions with `awaiting_action=False` are discarded because policy ticks may be
+faster than environment steps. The policy owns action-chunk queues; benchmark is unaware of them.
 
-### 4.2 `config.py` — 配置与校验
+### 4.2 `config.py`: configuration and validation
 
-| 单元 | 职责 |
+| Unit | Responsibility |
 |:---|:---|
-| `STATE_JOINTS` | proprio 的关节名列表，**必须与 policy 的 `state_joints` 逐字一致** |
-| `STATE_SEMANTICS` | 8 维的语义标注（eef_pos/axis_angle/gripper），与 `STATE_JOINTS` 逐位对应，仅作文档 |
-| `parse_id_list()` | 解析 `all` / `"0-9"` / `"0,2-4,8"` / `[0,1,2]` / `None` |
-| `derive_episode_seed()` | 把 `(seed, task, init, run)` 映射成稳定种子。**刻意不用内建 `hash()`**（对 str 带 `PYTHONHASHSEED` 随机化，跨进程不一致，正好毁掉复现性） |
-| `BenchmarkNodeConfig` | 配置数据类 |
-| `load_config()` | 读 YAML + 校验 `layout_mode` / `num_runs` / `max_steps` |
-| `resolve_and_validate_plan()` | 回填 `all`，**逐 task** 校验 id 范围。不同 task 的 init state 数未必相同，不能拿 `task_ids[0]` 代表全体 |
+| `STATE_JOINTS` | Proprioceptive names; must exactly match policy `state_joints` |
+| `STATE_SEMANTICS` | Documentation-only 8D annotations aligned with `STATE_JOINTS`: eef_pos/axis_angle/gripper |
+| `parse_id_list()` | Parse `all`, `"0-9"`, `"0,2-4,8"`, `[0,1,2]`, `None` |
+| `derive_episode_seed()` | Stable seed from `(seed, task, init, run)`; avoids built-in `hash()` and per-process string randomization via `PYTHONHASHSEED` |
+| `BenchmarkNodeConfig` | Configuration dataclass |
+| `load_config()` | Load YAML and validate `layout_mode`, `num_runs`, `max_steps` |
+| `resolve_and_validate_plan()` | Expand `all` and validate IDs per task; tasks may have different initial-state counts |
 
-### 4.3 `adapters/libero_adapter.py` — LIBERO 特有逻辑
+### 4.3 `adapters/libero_adapter.py`: LIBERO integration
 
-**换 benchmark 只改这一个文件。**
+Keep benchmark-specific environment logic in the adapter when adding another benchmark.
 
-| 单元 | 职责 |
+| Unit | Responsibility |
 |:---|:---|
-| `num_tasks` / `num_init_states()` / `task_language()` | 批次展开需要的元信息 |
-| `_ensure_env()` | **同 task 复用 env，换 task 才重建**（建 env 约 2 s） |
-| `_sim()` | 沿包装链找到真正持有 `sim` 的那一层 |
-| `capture_layout()` / `restore_layout()` | 家具布局的快照与恢复（`body_pos` + `body_quat`），见 §7 坑 1 |
-| `reset_episode()` | 按 `layout_mode` 处理布局 → `env.reset()` → `set_init_state()` → 预热 → **设 `use_delta`** |
-| `step()` | 送 7 维动作，返回 `StepOutcome(obs, reward, done, success)` |
-| `check_success()` | **逐层兜底**找 `_check_success`（在 `env.env` 上，不在 `OffScreenRenderEnv` 上） |
-| `to_state()` | 8D proprio：`eef_pos(3) + axis_angle(3) + gripper_qpos(2)` |
-| `to_images()` | 取两路图并 **`[::-1,::-1]` 翻转** |
-| `quat_to_axisangle()` | robosuite 四元数是 `(x,y,z,w)` 顺序 |
+| `num_tasks` / `num_init_states()` / `task_language()` | Metadata for batch expansion |
+| `_ensure_env()` | Reuse environment within a task; rebuild on task change (approximately 2 seconds in documented setup) |
+| `_sim()` | Locate the wrapper layer owning `sim` |
+| `capture_layout()` / `restore_layout()` | Snapshot/restore fixture `body_pos` / `body_quat`; see pitfall 1 |
+| `reset_episode()` | Apply layout mode, reset environment, restore initial state, warm up, then set `use_delta` |
+| `step()` | Apply 7D action; return `StepOutcome(obs, reward, done, success)` |
+| `check_success()` | Find `_check_success` through wrappers, on `env.env` rather than `OffScreenRenderEnv` |
+| `to_state()` | 8D `eef_pos(3) + axis_angle(3) + gripper_qpos(2)` |
+| `to_images()` | Read two images and flip with `[::-1,::-1]` |
+| `quat_to_axisangle()` | robosuite quaternion order is `(x,y,z,w)` |
 
-### 4.4 `result.py` — 结果组装
+### 4.4 `result.py`: result assembly
 
-| 单元 | 职责 |
+| Unit | Responsibility |
 |:---|:---|
-| `EpisodeRecord` | 单 episode 记录，含 `episode_seed`、`success_source` |
-| `BenchmarkResult` | 批次聚合。`success_rate` **分母用计划总数**（中途取消时不虚高）；`mean_policy_latency_ms` 用 `is not None` 过滤（不能用真值判断，会丢掉恰好 0.0 的） |
-| `.dump()` | 落 `<result_dir>/<suite>_<时间戳>.json` |
+| `EpisodeRecord` | Per-episode record including `episode_seed` and `success_source` |
+| `BenchmarkResult` | Batch aggregation; `success_rate` divides by planned total, including cancelled work; latency filtering uses `is not None` to retain exact 0.0 values |
+| `.dump()` | Write `<result_dir>/<suite>_<timestamp>.json` |
 
 ---
 
-## 5. 结果
+## 5. Results
 
-落在 `result_dir`，schema 为 `BenchmarkExecutionResultV1`。
+Results are written to `result_dir` using `BenchmarkExecutionResultV1`.
 
-批次级：
+Batch fields:
 
-| 字段 | 说明 |
+| Field | Meaning |
 |:---|:---|
 | `status` | `succeeded` / `failed` / `cancelled` |
-| `successes` / `total_episodes` / `success_rate` | **分母是计划总数**，不是已完成数 |
-| `completed_episodes` / `valid_episodes` | 已完成 / 无 error 的 |
-| `timed_out_episodes` | 超时截断数 |
-| `layout_mode` / `seed` | **复现口径**，缺了无法复现场景 |
-| `num_steps` / `mean_policy_latency_ms` / `elapsed_s` | 步数 / 平均推理延迟 / 总耗时 |
+| `successes` / `total_episodes` / `success_rate` | Denominator is planned total, not completed count |
+| `completed_episodes` / `valid_episodes` | Completed episodes / episodes without errors |
+| `timed_out_episodes` | Timeout truncations |
+| `layout_mode` / `seed` | Required scene reproducibility parameters |
+| `num_steps` / `mean_policy_latency_ms` / `elapsed_s` | Steps / mean inference latency / elapsed time |
 
-逐 episode（`episodes[]`）：`episode_id`、`task_id`、`init_state_id`、`run_index`、`task_description`、`success`、`termination`（`success`/`failed`/`timed_out`）、`num_steps`、`return_value`、`episode_seed`、`mean_policy_latency_ms`、`success_source`、`error_code`/`error_message`。
+Each `episodes[]` entry includes `episode_id`, `task_id`, `init_state_id`, `run_index`,
+`task_description`, `success`, `termination` (`success`/`failed`/`timed_out`), `num_steps`,
+`return_value`, `episode_seed`, `mean_policy_latency_ms`, `success_source`, `error_code`/`error_message`.
 
-`first_attempt_*` / `final_*` / `assisted_*` / `episodes_replanned` / `recovered_after_replan` 一律 `null`——本节点不做恢复重试，留给上层填。
+`first_attempt_*`, `final_*`, `assisted_*`, `episodes_replanned` and `recovered_after_replan`
+remain `null`: this Node does not perform recovery retries; upper layers own those fields.
 
-批次中途 Ctrl-C 或 dora STOP：`status=cancelled`，**已完成的 episode 照常落盘**。
+Ctrl-C or Dora STOP mid-batch yields `status=cancelled`; completed episodes are still persisted.
 
 ---
 
-## 6. 排错
+## 6. Troubleshooting
 
-| 症状 | 原因 |
+| Symptom | Cause/check |
 |:---|:---|
-| 跑起来没反应、卡住不动 | policy 没进 running（`policy_id` 对不上，或没收到 `start`）；也可能 policy 卡死——本节点**没有超时看门狗**，会静默悬停 |
-| 首个 episode 用了上一句指令 | dataflow 里 `policy_command` 的 `queue_size` 没加深 |
-| 分数异常低但不报错 | 按顺序查：proprio 语义 → 图像朝向 → 相机别名 → 分辨率 → `control_mode` |
-| `AttributeError: _check_success` | 判定在 `env.env` 上，不在 `OffScreenRenderEnv` 上 |
-| `AttributeError: 'BenchmarkNodeConfig' object has no attribute ...` | 改过 `config.py` 但漏了字段。**改配置模型后必须跑一次真 dataflow**，`py_compile` 查不出来 |
-| `TypeError: mj_fullM` | mujoco 是 2.3.7，需要 3.x（`conda create --clone` 会让版本号说谎，认功能别认版本号） |
-| `os.path.join(None, ...)` TypeError | `CONDA_PREFIX` 没设，adapter 已用 `sys.prefix` 兜底 |
-| `Could not initiate node from environment variable` | 对端节点先崩了，看它的 traceback，不是本节点的问题 |
-| version mismatch | `dora-rs` 与 `dora-rs-cli` 版本不一致 |
-| 同配置两次跑分不同 | 检查 `layout_mode` 是否为 `legacy` |
-| `ProcessorMigrationError` | checkpoint 是旧版归一化格式，跑 lerobot 的 `migrate_policy_normalization.py` |
+| No progress after startup | Policy is not running: mismatched `policy_id` or missing `start`; a hung policy also stalls silently because no timeout watchdog exists |
+| First episode uses the previous instruction | Increase `policy_command` input `queue_size` |
+| Low scores without errors | Check proprioceptive semantics, image orientation, camera aliases, resolution and `control_mode`, in that order |
+| `AttributeError: _check_success` | Method belongs to `env.env`, not `OffScreenRenderEnv` |
+| Missing `BenchmarkNodeConfig` attribute | A configuration field was omitted; run a real dataflow after configuration-model changes, not just `py_compile` |
+| `TypeError: mj_fullM` | MuJoCo 3.x functionality is required; a cloned environment's version label alone is insufficient |
+| `os.path.join(None, ...)` TypeError | `CONDA_PREFIX` missing; adapter falls back to `sys.prefix` |
+| `Could not initiate node from environment variable` | Inspect the peer Node's earlier traceback |
+| Version mismatch | Node/CLI Dora versions differ |
+| Same configuration, different scores | Check for `layout_mode: legacy` |
+| `ProcessorMigrationError` | Migrate historical normalization using LeRobot `migrate_policy_normalization.py` |
 
 ---
 
-## 7. 改代码前必读的七个坑
+## 7. Seven implementation pitfalls
 
-都是实测踩出来的，**每一条都不报错**，症状是分数安静地烂掉。
+The repository documents these as silent causes of score degradation:
 
-1. **`set_init_state` 恢复不了家具**。无关节的 fixture（炉子、柜体）位姿存在 `model.body_pos` / `model.body_quat` 里，属于**模型**；`set_init_state()` 只恢复 `qpos/qvel`，属于**状态**。`env.reset()` 每次重新采样家具摆放，恢复不到。实测同一 `(task, init_state)` 在不同 reset 次序下家具漂 **1.5 cm**、渲染图 **10% 像素不同**，而 `qpos+qvel`、相机、光照全部逐位相同——只看状态发现不了。
-   由 `layout_mode` 控制：`per_episode`（默认，布局 = `(seed,task,init,run)` 的纯函数）/ `fixed`（每 task 一套，做状态分支用）/ `legacy`（旧行为）。实测同 episode 身份隔两局重跑：per_episode 图像差异 **0.000%**，legacy **12.653%**。
+1. **`set_init_state` does not restore fixtures.** Jointless fixture poses live in model `body_pos/body_quat`;
+   restoring state `qpos/qvel` does not undo fixture resampling by `env.reset()`.
+   Historical observations reported 1.5 cm fixture drift and 10% differing pixels despite identical state,
+   cameras and lighting. `layout_mode` selects `per_episode` (default; layout is a function of
+   `(seed,task,init,run)`), `fixed` (one layout per task) or legacy behavior. Repeated episode identities
+   reportedly differed by 0.000% pixels in per_episode mode versus 12.653% in legacy mode.
 
-2. **图像必须翻转**。LIBERO 离屏渲染上下颠倒，adapter 里做了 `[::-1, ::-1]`。`libero_sim_node.py` 那个雏形不翻，是因为它的 obs 来自 `server.py`（那边已翻过）。本节点直接读 env，**必须自己翻**。
+2. **Flip images.** This direct-environment adapter applies `[::-1, ::-1]` to offscreen images.
+   The earlier `libero_sim_node.py` prototype received already-flipped observations from `server.py`.
 
-3. **成功判定的属性路径**。`OffScreenRenderEnv` 上**没有** `_check_success`，实现在被包一层的 `env.env` 上；`info` 是空字典，`info["is_success"]` 那条路也不通。
+3. **Check success on the correct wrapper.** `_check_success` is on `env.env`, not `OffScreenRenderEnv`;
+   `info` is empty, so `info["is_success"]` is unavailable.
 
-4. **`policy_command` 的 queue_size 必须显式加深**。episode 边界连发 `set_instruction` + `reset_scene`，默认深度会把前一条挤掉，表现为**首个 episode 拿着上一句指令跑完**——照样出分，不报错。
+4. **Set `policy_command` queue depth explicitly.** Episode boundaries emit `set_instruction` and
+   `reset_scene` back-to-back; default depth may drop the instruction and silently reuse the previous one.
 
-5. **`use_delta` 必须在 `env.reset()` 之后设**。reset 会把 controller 覆盖回默认值。
+5. **Set `use_delta` after `env.reset()`.** Reset restores the controller default.
 
-6. **`CONDA_PREFIX`**。conda 版 mujoco 用它定位 `include/`，而该变量只有 `conda activate` 才会设——dora 直接拉起解释器时没有。adapter 已用 `sys.prefix` 兜底。
+6. **Handle missing `CONDA_PREFIX`.** Direct Dora interpreter startup may lack conda activation;
+   the adapter falls back to `sys.prefix` to locate MuJoCo includes.
 
-7. **不要盲从"LIBERO 必须 py3.8"**。`LIBERO/setup.py` 与 robosuite 1.4.0 的 `python_requires` 都只写 `>=3`。py3.8 上要给 forge_msgs 补四层兼容，其中 `zip(strict=True)`（11 处，含必经路径）**只能全局改写 `builtins.zip`**，会波及同进程里 env/numpy 的每一次 zip 调用，不可接受。py3.12 下全部归零。
+7. **Use the documented Python 3.12 environment.** LIBERO and robosuite 1.4.0 declare `>=3`, not a
+   hard Python 3.8 requirement. Supporting 3.8 would require multiple Forge compatibility changes,
+   including 11 `zip(strict=True)` uses; globally replacing `builtins.zip` would affect env/numpy too.
 
-另：episode 间用 `reset_scene` 而不是 `reset`——后者把 policy 打回 idle 相，之后不再响应观测。
+Between episodes, use `reset_scene`, not `reset`: the latter returns the policy to idle and stops observation handling.
 
 ---
 
-## 8. 测试矩阵
+## 8. Historical test matrix
 
-截至 2026-08-16 实际跑过的组合。**"两节点"= 完整 Forge dataflow（benchmark 节点 + policy 节点经 dora 通信）；"离线"= 策略在同一进程内直接驱动 env，用同一套 adapter，但不经 dora。**
+These are repository-reported combinations as of 2026-08-16. **Two-Node** means benchmark and policy
+communicate through Dora; **offline** means the policy drives the environment in-process through the
+same adapter, without Dora.
 
-### 8.1 已测出分数
+### 8.1 Reported scores
 
-| 策略 | suite | 规模 | 渲染 | 方式 | success_rate | 平均延迟 | 耗时 |
+| Policy | Suite | Scale | Rendering | Mode | success_rate | Mean latency | Elapsed |
 |:---|:---|:---|---:|:---|---:|---:|---:|
-| VLA-JEPA | libero_spatial | 2 task × 2 init = 4 ep | 256 | **两节点** | **4/4 = 100%** | 16.3 ms | 20 s |
-| VLA-JEPA | libero_spatial | 10 task × 10 init = 100 ep | 256 | 离线 | **94/100 = 94.0%** | 15–28 ms | 643 s |
-| VLA-JEPA | libero_spatial | 10 task × 10 init = 100 ep | 224 | 离线 | **96/100 = 96.0%** | 15–28 ms | 603 s |
-| LingBot-VA | libero_10 | 2 task × 1 init = 2 ep | 256 | **两节点** | **2/2 = 100%** | 221 ms | 129 s |
-| LingBot-VA | libero_10 | 2 task × 2 init = 4 ep | 256 | 离线 | **3/4 = 75%** | 245–310 ms | 322 s |
+| VLA-JEPA | libero_spatial | 2 tasks x 2 init = 4 ep | 256 | Two-Node | 4/4 = 100% | 16.3 ms | 20 s |
+| VLA-JEPA | libero_spatial | 10 tasks x 10 init = 100 ep | 256 | Offline | 94/100 = 94.0% | 15–28 ms | 643 s |
+| VLA-JEPA | libero_spatial | 10 tasks x 10 init = 100 ep | 224 | Offline | 96/100 = 96.0% | 15–28 ms | 603 s |
+| LingBot-VA | libero_10 | 2 tasks x 1 init = 2 ep | 256 | Two-Node | 2/2 = 100% | 221 ms | 129 s |
+| LingBot-VA | libero_10 | 2 tasks x 2 init = 4 ep | 256 | Offline | 3/4 = 75% | 245–310 ms | 322 s |
 
-统一参数：`max_steps=300`、`num_steps_wait=10`、`control_mode=relative`、`seed=0`、`layout_mode=per_episode`。
+Shared parameters: `max_steps=300`, `num_steps_wait=10`, `control_mode=relative`, `seed=0`, `layout_mode=per_episode`.
 
-**参照基线**：OpenVLA 在 LIBERO-Spatial 为 84.7%。VLA-JEPA 的 94–96% 高于它，反过来说明观测口径没有系统性错误——口径错了不可能高于基线。
+The cited OpenVLA LIBERO-Spatial baseline is 84.7%; reported VLA-JEPA runs achieved 94–96%.
+These historical comparisons do not establish equivalence of every evaluation convention.
 
-**渲染 224 vs 256 无显著差异**：两组共同失败 3 个（t5_i0/i4/i5），256 独有 3 个，224 独有 1 个，McNemar 精确检验 p = 0.63。默认保持 256。
+For rendering 224 vs 256, three failures were shared (t5_i0/i4/i5), three were unique to 256,
+and one to 224; the reported exact McNemar test gave p = 0.63. Default rendering remains 256.
 
-**失败模式**：VLA-JEPA 的 6 个失败全部集中在 task 5 且全是 `timed_out`，没有碰撞失败。但调大 `max_steps` 没用——所有成功 episode 最长只跑 137 步，失败的都跑满 300 步，是策略卡住不是时间不够。
+All six VLA-JEPA failures in the 256 run were task-5 `timed_out` outcomes, with no collision failure reported.
+Successful episodes took at most 137 steps, while failures exhausted 300; this suggests policy stalls
+rather than merely insufficient time in those runs.
 
-### 8.2 未通过 / 未测
+### 8.2 Failed or untested combinations
 
-| 策略 | 状态 | 原因 |
+| Policy | Status | Reason |
 |:---|:---|:---|
-| Diffusion（`diffusion_synth`） | ⚠️ 能加载能推理（398 ms） | **PushT 域**：2D state / 2D action / 96×96，跑不了 LIBERO |
-| Diffusion（`diffusion_pusht`） | ❌ 加载失败 | `ProcessorMigrationError`，旧版归一化格式，需跑 lerobot 的 `migrate_policy_normalization.py` |
-| ACT | ❌ 未测 | 盘上无 checkpoint（内部训练产物） |
-| Pi0.5 | ❌ 未测 | 盘上无 checkpoint（内部训练产物） |
-| SmolVLA（`smolvla_libero`） | ⚠️ 未测 | config 声明 `observation.state` 6 维，归一化统计量却是 8 维，口径自相矛盾；且需 3 个相机而 LIBERO 只有 2 个 |
+| Diffusion (`diffusion_synth`) | Loads/infers (398 ms) | PushT: 2D state/action, 96x96 images; incompatible with LIBERO |
+| Diffusion (`diffusion_pusht`) | Load failure | `ProcessorMigrationError`; run LeRobot normalization migration |
+| ACT | Untested | No supplied training checkpoint available in the documented environment |
+| Pi0.5 | Untested | No supplied training checkpoint available in the documented environment |
+| SmolVLA (`smolvla_libero`) | Untested | Config declares 6D state but statistics are 8D; model needs 3 cameras while LIBERO provides 2 |
 
-### 8.3 验证覆盖与缺口
+### 8.3 Coverage and gaps
 
-**已验证**：完整 Forge 两节点闭环、adapter 口径（三条独立证据：checkpoint 归一化统计量的量纲、LIBERO 原始 demo 的字段结构、实测分数高于已发表基线）、`policy_command` 四条命令时序、1:1 锁步、批次展开与 `t/i/r` 索引、场景可复现、越界 fail fast、异常路径必落盘、结果 schema。
+The repository reports checks of the full two-Node loop, adapter conventions using normalization
+statistics/original LIBERO demonstrations/scores, four `policy_command` sequences, 1:1 lockstep,
+batch expansion and `t/i/r` indexing, scene reproducibility, fail-fast bounds validation,
+exception-path persistence and result schema.
 
-两个策略结构差异很大——VLA-JEPA 有 `observation.state`、LingBot-VA 没有，chunk 7 vs 16，延迟差 13 倍——都跑通，说明节点不是只对某一个策略凑合。
+The two policies differ in state inputs, chunk length (7 vs 16) and approximately 13-fold latency;
+both were exercised, rather than only one policy architecture.
 
-**缺口**：
+Remaining gaps:
 
-- 两节点只跑过 4 ep 和 2 ep，**100 ep 那个数字是离线跑的**。长批次下 dora 链路的稳定性（跨 10 个 task 反复重建 env、几百 episode 的内存表现）没有证据
-- suite 只测过 `libero_spatial` 和 `libero_10`，**`object` / `goal` / `90` / `100` 没碰过**
-- `num_runs > 1` 没有实测过（`layout_mode=per_episode` 下不同 run 会拿到不同布局，理论上有差异，但没验）
+- Two-Node runs covered only 4 and 2 episodes. The 100-episode results were offline; long Dora batches,
+  repeated environment rebuilding across 10 tasks and hundreds of episodes of memory behavior remain unestablished.
+- Only `libero_spatial` and `libero_10` were exercised; `object`, `goal`, `90`, `100` were not.
+- `num_runs > 1` was not exercised; per_episode mode would vary layouts across runs, but that remains unverified.
 
 ---
 
-## 9. 已知限制
+## 9. Known limitations
 
-**功能未实现**
+Unimplemented features:
 
-- `record_dir` 的 mp4 落盘（配置项已留，无代码）
-- 资源占用（CPU/GPU 峰值）记录
-- wall-clock 看门狗——policy 卡死时节点静默悬停，只能靠 dora STOP 兜底
+- MP4 output for `record_dir` (configuration exists, implementation absent).
+- Peak CPU/GPU resource tracking.
+- Wall-clock watchdog; a hung policy stalls the Node until Dora STOP.
 
-**设计上的欠缺**
+Design limitations:
 
-- 相机别名（`image/main`、`image/second`）与 obs key（`agentview_image`、`robot0_eye_in_hand_image`）**硬编码在 adapter**，换 checkpoint 要改代码，应改为从 config 读
-- 启动竞态：`start` 命令与首帧观测走不同通道且无 ack，靠通道投递顺序侥幸成立
-- 预热步在 `use_delta` 设置**之前**执行，`control_mode: absolute` 时预热用的是默认 delta 语义（当前预热动作全 0 所以无害）
-- 无启动自检：分辨率 / proprio 维度 / 别名与 checkpoint 的交叉核对尚未实现
+- Camera aliases `image/main`, `image/second` and observation keys `agentview_image`, `robot0_eye_in_hand_image`
+  are hardcoded in the adapter; changing checkpoints may require code changes.
+- Startup has no acknowledgment between separate start/observation channels and relies on delivery ordering.
+- Warmup occurs before `use_delta` is set. With `control_mode: absolute`, warmup still uses default delta
+  semantics; currently its all-zero actions avoid an effect.
+- No startup cross-check of resolution, proprioceptive dimensions or aliases against the checkpoint.
 
 
-## 10. Serve 模式与独立 Node Bundle
+## 10. Serve mode and standalone Node bundle
 
-本节点支持两种运行方式：
+The same `main.py` / `libero_benchmark` entrypoint selects two modes:
 
-- serve: false（默认）：保持原有 autorun 行为，读取一次配置、完成一批 episode 后退出。
-- serve: true：启动常驻 benchmark 服务，等待 bench_cmd，每条 run 命令创建独立 invocation，完成后回到 idle，进程和 LIBERO runtime 保持存活。
+- `serve: false` (default): autorun one configured batch, then exit.
+- `serve: true`: resident Node directly registering `benchmark.controller`, with `describe` Query and `run` Session.
 
-serve 模式的通道契约：
+Connect the Gateway provider output to this Node's `tool_in` and its `tool_out` back to the Gateway provider input.
+Retain `action` input and policy observations, images and `policy_command` dataflow.
+`bench_tool/node.py` composes the Endpoint handler and evaluation loop in the same process; no separate Endpoint Node is needed.
 
-    bench_cmd    endpoint -> libero_benchmark
-    bench_report libero_benchmark -> endpoint
-    action       policy -> libero_benchmark
+Call `describe` before `run`. Session uses stop at episode boundaries; neither accepted nor stop accepted
+is terminal. Results include primary_metric, success_rate, successes, total_episodes, completed_episodes,
+result_path and episode details; see [result assembly](bench_tool/result_shape.py).
 
-bench_cmd 使用 JSON（线协议版本由 runtime 校验），支持：
+### 10.1 Build the standalone Node
 
-    {"type": "describe"}
-    {"type": "run", "invocation_id": "inv-1",
-     "plan": {"task_ids": [0], "init_state_ids": [0], "num_runs": 1, "seed": 0}}
-    {"type": "cancel", "invocation_id": "inv-1"}
-
-bench_report 会报告 capabilities、accepted、progress、heartbeat、rejected 和 result。
-一次运行的终态 result 包含：
-
-- status
-- primary_metric
-- success_rate
-- successes
-- total_episodes
-- completed_episodes
-- result_path
-- episode 的 task_id、init_state_id、run_index、episode_seed、success、termination
-
-num_steps 是诊断字段；真实 LINGBOT-VA 已验证存在 run-to-run nondeterminism，不应单独作为 Skill 等价性的判定字段。
-
-### 10.1 构建独立 Node
-
-在仓库根目录执行：
+From the repository root:
 
     ./scripts/build_pyinstaller.sh
 
-输出：
+Output:
 
     dist/libero_benchmark
 
-构建脚本使用 PyInstaller one-file，并收集本节点的 _core、LIBERO、robosuite、MuJoCo Python 模块、Dora、Forge messages 和必要的 package data。构建时不需要访问其他 Forge checkout。
+The PyInstaller one-file build collects _core, LIBERO, robosuite, MuJoCo Python modules, Dora,
+Forge messages and required package data. No other Forge checkout is required at build time.
 
-节点不包含 LINGBOT policy 或 checkpoint。大体积 LIBERO scene/object assets 作为宿主 runtime asset 提供，通过标准 LIBERO 配置定位；不要把模型或私人机器路径提交到仓库。
+The Node excludes LINGBOT policies/checkpoints. Large LIBERO scene/object assets are host runtime assets
+located through standard LIBERO configuration; do not commit models or private machine paths.
 
-### 10.2 宿主环境
+### 10.2 Host environment
 
-运行 headless LIBERO 时需要：
+For headless LIBERO:
 
     export MUJOCO_GL=egl
     export PYOPENGL_PLATFORM=egl
 
-宿主需要可用的 EGL/OpenGL 驱动（包括 libEGL / libGL 及对应 vendor driver）和正式部署的 LIBERO assets。benchmark Node 本身不依赖 CUDA；GPU/CUDA 由独立 policy Node 按其配置使用。
+The host needs working EGL/OpenGL drivers (libEGL/libGL and vendor drivers) and installed LIBERO assets.
+The benchmark Node itself does not require CUDA; the separate policy Node uses GPU/CUDA according to its configuration.
 
-构建完成后可从任意临时目录执行：
+After building, run from an arbitrary temporary directory:
 
     unset PYTHONPATH
     /tmp/libero_benchmark
 
-确认 executable 不依赖源码 checkout、私人 Python 路径或外部 PYTHONPATH。
+Verify that the executable does not depend on a source checkout, private Python paths or external PYTHONPATH.
 
-### 10.3 兼容性与故障排查
+### 10.3 Compatibility and troubleshooting
 
-- BENCH_NOT_READY：等待 benchmark 初始化后重新执行 describe，不要修改 runtime manager。
-- HTTP 503 / operation concurrency ... exhausted：当前 invocation 仍在执行；请求应立即拒绝，不排队、不创建第二个 benchmark execution。
-- startup timeout：确认 PAOS profile 的 startup_timeout_s 足以覆盖 LIBERO/MuJoCo 初始化时间。
-- result_path：以 bench_report 的终态 result 为准；不要只根据 accepted 判断 benchmark 已完成。
+- BENCH_NOT_READY: wait for benchmark initialization, then retry describe; do not modify the runtime manager.
+- HTTP 503 / operation concurrency ... exhausted: an invocation remains active; reject immediately without queueing or starting another execution.
+- Startup timeout: allow sufficient profile `startup_timeout_s` for LIBERO/MuJoCo initialization.
+- result_path: use the terminal Tool invocation result; accepted alone does not establish completion.
 
-## 11. 两个独立 Forge Node
+## 11. Endpoint and deployment versions
 
-本仓库同时提供两个职责独立、可分别测试和构建的 Node：
+Current source uses `libero_benchmark` itself as the provider in serve mode.
+[`benchmark.controller`](bench_tool/descriptor.py) declares `run` as Session.
+There is no `bench_endpoint/` directory or `bench_endpoint` executable.
 
-- `libero_benchmark`：负责 LIBERO 仿真环境、episode 生命周期、评估和结果落盘。
-- `bench_endpoint`：通过 Forge Tool endpoint 对外暴露 `bench.describe`（Query）和
-  `bench.run`（Action），并把调用转发给正在运行的 benchmark Node。
+Historical separate-Endpoint, Query/Action or `bench_cmd/bench_report` instructions do not configure
+this version. Configure Query/Session ToolSpecs and provider channels in Gateway, matching Gateway,
+`forge-tool`, `forge-msgs`, Dora and consumer versions. Source capability does not establish historical
+Skill-locked binary capability.
 
-二者不是同一个 Node；联调时的调用链为：
-
-    Gateway → bench_endpoint → libero_benchmark ↔ policy → result
-
-### 11.1 bench_endpoint Node
-
-源码位于 `bench_endpoint/`，包含独立的 Python package、37 个单元测试和
-PyInstaller one-file 构建脚本。它使用 Forge endpoint protocol
-`forge.tool.endpoint/v1alpha1`，保持 Query/Action 语义和 invocation 的
-accepted/running/completed 生命周期，不引入 Session。
-
-运行测试：
-
-    PYTHONPATH=bench_endpoint/src:<forge-gateway-src>/src python -m pytest -q bench_endpoint/tests
-
-构建（Gateway 源码是显式的构建时输入，须使用已兼容的 Gateway revision）：
-
-    ./bench_endpoint/scripts/build_pyinstaller.sh --forge-gateway-src <forge-gateway-checkout>
-
-输出为 `bench_endpoint/dist/bench_endpoint`。构建产物不提交到 Git；发布时可将该
-可执行文件单独归档为根目录只有 `bench_endpoint` 的 tar.gz。运行时需要与
-benchmark Node 连接的 Gateway/Dora 通道 `bench_endpoint_request` /
-`bench_endpoint_response`，以及 benchmark Node 提供的 `bench_cmd` /
-`bench_report`。
-
-最小调用参数示例：
-
-    {"task_ids": [0], "init_state_ids": [0], "num_runs": 1, "seed": 0}
-
-先调用 `bench.describe` 获取 live capabilities，再构造 `bench.run`；accepted
-只表示 invocation 已接收，最终结果必须读取 status/result。结果中的
-`primary_metric`、`success_rate`、`successes`、`total_episodes`、
-`completed_episodes` 和 `result_path` 均由 benchmark Node 负责计算和报告，
-endpoint/agent 不自行判分或跨 invocation 聚合。
+The benchmark Node computes scores/results; Gateway/agent neither substitutes its own scoring nor aggregates across invocations.

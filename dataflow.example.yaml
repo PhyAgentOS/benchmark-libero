@@ -5,8 +5,9 @@
 # 该示例默认是 autorun（config 中 serve 缺省/为 false）。启用 Tool serve 时：
 # 1. 在 config.yaml 设置 serve: true；
 # 2. 在 benchmark 节点 inputs 增加：
-#      bench_cmd: bench_endpoint/bench_cmd
-# 3. 在 outputs 增加 bench_report；bench_endpoint 由独立仓库提供。
+#      tool_in: gateway/<configured_provider_output>
+# 3. 在 outputs 增加 tool_out，并接回 Gateway 对应 provider input；
+#    Gateway tools.providers 和 tools.specs 须配置 benchmark.controller 的 Query/Session。
 # 旧的 action / benchmark_status / benchmark_result 通道保持不变。
 
 nodes:
