@@ -50,6 +50,12 @@ class LiberoAdapter:
     """进程内持有 LIBERO env，不经过 TargetWS、不经过 mujoco_sim。"""
 
     SUCCESS_SOURCE = "env.env._check_success"
+    # OSC_POSE：3 平移 + 3 旋转 + 1 夹爪。核心按它在 step 前校验，维度不符整批 failed。
+    ACTION_DIM = 7
+
+    @property
+    def action_dim(self) -> int:
+        return self.ACTION_DIM
 
     def __init__(self, cfg) -> None:
         os.environ.setdefault("MUJOCO_GL", "egl")
@@ -186,9 +192,11 @@ class LiberoAdapter:
     def step(self, action: np.ndarray) -> StepOutcome:
         env = self._require_env()
         act = np.asarray(action, dtype=np.float32).reshape(-1)
-        if act.size < 7 or not np.all(np.isfinite(act)):
-            raise ValueError(f"LIBERO action must contain 7 finite values, got size={act.size}")
-        act = act[:7]
+        # 严格等于 7：多出来的维度不再截断。截断会把维度错配的 policy 静默跑成 0 分。
+        if act.size != self.ACTION_DIM or not np.all(np.isfinite(act)):
+            raise ValueError(
+                f"LIBERO action must contain exactly {self.ACTION_DIM} finite values, got size={act.size}"
+            )
         obs, reward, done, _info = env.step(act.tolist())
         success = self.check_success()
         return StepOutcome(

@@ -51,6 +51,8 @@ class FakeAdapter:
     """
 
     RECORD_FPS = 20.0
+    # 环境动作契约：与 drive() 喂的零动作同维度。
+    action_dim: int | None = len(JOINTS)
 
     def __init__(self, *, succeed: bool = True, steps_per_episode: int = 2) -> None:
         self.succeed = succeed

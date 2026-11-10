@@ -48,6 +48,7 @@ _DESCRIBE_FIELDS = (
     "num_tasks",
     "tasks",
     "joint_names",
+    "action_dim",
     "camera_ids",
     "defaults",
     "limits",
@@ -153,7 +154,14 @@ class BenchSessionEndpoint:
             error = tool_error(
                 "BENCH_RUN_FAILED",
                 failure_summary or "批次未正常结束",
-                details={"status": result.status},
+                details={
+                    "status": result.status,
+                    **(
+                        {"error_code": handle.session.runner.failure_code}
+                        if handle.session.runner.failure_code
+                        else {}
+                    ),
+                },
             )
         self.table.finish(handle.key.invocation_id, phase, outputs=outputs, error=error)
 

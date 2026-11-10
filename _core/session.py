@@ -14,6 +14,7 @@ from dataclasses import replace
 from typing import Any
 
 from .config import BaseBenchmarkConfig, resolve_and_validate_plan
+from .adapter import expected_action_dim
 from .runner import BenchmarkRunner
 
 
@@ -87,6 +88,7 @@ def capabilities_payload(
         "num_tasks": int(adapter.num_tasks),
         "tasks": tasks,
         "joint_names": list(adapter.state_joint_names()),
+        "action_dim": expected_action_dim(adapter),
         "camera_ids": _camera_ids(cfg, adapter),
         "defaults": {
             "num_runs": cfg.num_runs,

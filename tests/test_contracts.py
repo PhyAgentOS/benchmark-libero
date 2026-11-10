@@ -87,3 +87,31 @@ def test_quaternion_conversion_identity() -> None:
         quat_to_axisangle(np.array([0.0, 0.0, 0.0, 1.0])),
         np.zeros(3, dtype=np.float32),
     )
+
+
+def test_libero_action_dim_is_strict_seven() -> None:
+    """7 维 OSC_POSE；多维不截断、少维不补齐，都在进环境前抛。"""
+    import pytest
+
+    from adapters.libero_adapter import LiberoAdapter
+
+    adapter = object.__new__(LiberoAdapter)  # 绕过 __init__，不建 env
+    assert adapter.action_dim == 7
+
+    class _Env:
+        def __init__(self) -> None:
+            self.actions = []
+
+        def step(self, action):
+            self.actions.append(action)
+            return {}, 0.0, False, {}
+
+    env = _Env()
+    adapter._env = env
+    adapter.check_success = lambda: False
+    for bad in (np.zeros(6), np.zeros(8), np.zeros(14), np.array([0, 0, 0, 0, 0, 0, np.nan])):
+        with pytest.raises(ValueError, match="exactly 7"):
+            adapter.step(bad)
+    assert env.actions == []
+    adapter.step(np.zeros(7))
+    assert len(env.actions) == 1 and len(env.actions[0]) == 7

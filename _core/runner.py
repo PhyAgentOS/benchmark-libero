@@ -15,7 +15,7 @@ import numpy as np
 import pyarrow as pa
 from forge_msgs import Image, JointCommand, JointState, PolicyCommand
 
-from .adapter import default_aggregate
+from .adapter import ACTION_DIM_MISMATCH, default_aggregate, expected_action_dim
 from .config import BaseBenchmarkConfig, derive_episode_seed
 from .video import EpisodeRecorder
 from .result import BenchmarkResult, EpisodeRecord
@@ -76,10 +76,14 @@ class BenchmarkRunner:
         self.stop_reason: str | None = None
         # finish() 时带上的摘要；endpoint 的七字段输出读它。
         self.failure_summary: str | None = None
+        # finish() 时带上的机器可读错误码（如 action_dim_mismatch），endpoint 放进 error.details。
+        self.failure_code: str | None = None
         # finish() 里 dump() 的最终落盘路径。只做记录，不参与判分。
         self.result_path: str | None = None
 
         self._joint_names = list(adapter.state_joint_names())
+        # 环境动作契约。adapter 声明了非法值时这里就抛，session 起不来，不会跑到一半才错。
+        self.action_dim = expected_action_dim(adapter)
         self.recorder = EpisodeRecorder(
             cfg.record_dir, fps=getattr(adapter, "RECORD_FPS", 20.0), log=self._log
         )
@@ -191,6 +195,15 @@ class BenchmarkRunner:
             return  # 非 1:1 的多余 action 直接丢弃
 
         action = np.asarray(command.position, dtype=np.float32).reshape(-1)
+        if self.action_dim is not None and action.size != self.action_dim:
+            # 维度不符是 policy 与 benchmark 的契约错配，不是策略能力问题：
+            # 继续跑只会把整批记成 0 分。当前 episode 留证据后整批判 failed。
+            self.abort_run(
+                ACTION_DIM_MISMATCH,
+                f"policy action 维度 {action.size} ≠ benchmark 动作空间 {self.action_dim}"
+                f"（{self.cfg.benchmark}/{self.cfg.suite}），批次中止，结果不可用于评分",
+            )
+            return
         if action.size == 0 or not np.all(np.isfinite(action)):
             self.fail_current("invalid_action", f"action 非法：size={action.size}")
             return
@@ -285,13 +298,33 @@ class BenchmarkRunner:
         )
         self.advance()
 
+    def abort_run(self, code: str, message: str) -> None:
+        """契约级错误：当前 episode 记失败留证据，然后整批 failed，不再开下一集。"""
+        if self.finished:
+            return
+        self._log(f"批次中止：{code} {message}")
+        if 0 <= self.plan_index < len(self.plan):
+            self._record_episode(
+                success=False, termination="failed", error_code=code, error_message=message
+            )
+        self.finish("failed", failure_summary=message, failure_code=code)
+
     # ---- 批次收尾 ----
 
-    def finish(self, status: str, failure_summary: str | None = None) -> None:
+    def finish(
+        self,
+        status: str,
+        failure_summary: str | None = None,
+        failure_code: str | None = None,
+    ) -> None:
         if self.finished:
             return
         self.finished = True
         self.failure_summary = failure_summary
+        self.failure_code = failure_code
+        if failure_code:
+            self.result.error_code = failure_code
+            self.result.error_message = failure_summary
         self.result.status = status
         self.result.elapsed_s = time.time() - self.started_at
 
