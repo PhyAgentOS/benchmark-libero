@@ -82,6 +82,9 @@ class BenchmarkResult:
     # 复现口径：benchmark 特有的、影响分数的配置（如 LIBERO 的 layout_mode/control_mode）
     reproducibility: dict[str, Any] = field(default_factory=dict)
     status: str = "running"
+    # 批次级错误（契约错配等），非 None 表示整批结果不可用于评分
+    error_code: str | None = None
+    error_message: str | None = None
     episodes: list[EpisodeRecord] = field(default_factory=list)
     elapsed_s: float | None = None
     primary_metric: dict[str, Any] = field(default_factory=dict)
@@ -112,6 +115,8 @@ class BenchmarkResult:
             "schema_version": SCHEMA_VERSION,
             "benchmark": self.benchmark,
             "status": self.status,
+            "error_code": self.error_code,
+            "error_message": self.error_message,
             "suite": self.suite,
             "execution_mode": "target_native",
             "max_steps": self.max_steps,

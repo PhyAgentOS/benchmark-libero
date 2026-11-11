@@ -69,6 +69,10 @@ class BenchmarkAdapter(Protocol):
         """proprio 的关节名，必须与 policy 配置的 state_joints 逐字一致。"""
         ...
 
+    # action_dim（可选属性，int）：环境动作空间的维度。声明了就由核心在 step
+    # 之前逐个 action 校验，维度不符整批判 failed（action_dim_mismatch），
+    # 不会被记成"策略失败"的 0 分。不声明则沿用旧行为（只由 adapter.step 自查）。
+
     def aggregate(self, episode_metrics: list[dict[str, Any]]) -> tuple[dict, dict]:
         """把逐 episode 的 metrics 聚合成 (primary_metric, metrics)。
 
@@ -76,6 +80,19 @@ class BenchmarkAdapter(Protocol):
         CALVIN 这类要覆盖成 avg_sequence_length。
         """
         ...
+
+
+ACTION_DIM_MISMATCH = "action_dim_mismatch"
+
+
+def expected_action_dim(adapter) -> int | None:
+    """读 adapter 声明的动作维度。没声明返回 None；声明了但非法直接抛。"""
+    value = getattr(adapter, "action_dim", None)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, np.integer)) or int(value) <= 0:
+        raise ValueError(f"adapter.action_dim 必须是正整数，得到 {value!r}")
+    return int(value)
 
 
 def default_aggregate(
