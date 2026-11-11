@@ -1,6 +1,6 @@
 [project]
 name = "forge-benchmark-libero"
-version = "1.0.0"
+version = "1.1.0"
 description = "Standalone LIBERO benchmark node for Forge"
 requires-python = ">=3.12,<3.13"
 dependencies = [

@@ -68,6 +68,9 @@ class ServeToolLoop:
         self._log = log
         self.endpoint_instance_id = endpoint_instance_id or str(uuid.uuid4())
         self.caps = capabilities_payload(cfg, adapter, limits=bench_limits(cfg))
+        # 非默认 suite 的 capabilities 第一次被问到时才算（要读每个 task 的
+        # init state 文件，libero_90 有 90 个），之后缓存。
+        self._caps_by_suite: dict[str, dict[str, Any]] = {cfg.suite: self.caps}
         self.table = InvocationTable()
         self._async = asyncio.Runner()
         self.endpoint = BenchSessionEndpoint(
@@ -78,12 +81,13 @@ class ServeToolLoop:
             self.caps,
             emit=self._emit_event,
             log=log,
+            caps_for=self.capabilities_for,
         )
         self.handler = ToolEndpointHandler(
             BENCH_DESCRIPTOR,
             endpoint_instance_id=self.endpoint_instance_id,
             operations={
-                OP_DESCRIBE: BenchDescribeEndpoint(self.caps),
+                OP_DESCRIBE: BenchDescribeEndpoint(self.caps, self.capabilities_for),
                 OP_RUN: self.endpoint,
             },
         )
@@ -91,6 +95,18 @@ class ServeToolLoop:
         self.lease = EndpointLease(BENCH_DESCRIPTOR, self.endpoint_instance_id)
         self._active: SessionHandle | None = None
         self._closed = False
+
+    # ---- capabilities ----
+
+    def capabilities_for(self, suite: str) -> dict[str, Any]:
+        """某个 suite 的 capabilities；白名单外抛 ValueError（endpoint 转成同步拒绝）。"""
+        caps = self._caps_by_suite.get(suite)
+        if caps is None:
+            caps = capabilities_payload(
+                self.cfg, self.adapter, limits=bench_limits(self.cfg), suite=suite
+            )
+            self._caps_by_suite[suite] = caps
+        return caps
 
     # ---- 出站 ----
 
@@ -273,6 +289,7 @@ def run_serve_tool(
     loop = ServeToolLoop(dora_node, cfg, adapter, log=log)
     log(
         f"serve 模式：benchmark={cfg.benchmark} suite={cfg.suite} "
+        f"suites={cfg.allowed_suites()} "
         f"{loop.caps['num_tasks']} 个 task，endpoint {BENCH_DESCRIPTOR.endpoint_id} 等待 tool_in"
     )
     rc = 0

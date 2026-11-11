@@ -69,12 +69,44 @@ class LiberoAdapter:
 
         self.cfg = cfg
         self._get_libero_path = get_libero_path
-        self.suite = benchmark.get_benchmark_dict()[cfg.suite]()
+        self._benchmark_dict = benchmark.get_benchmark_dict()
+        # suite 对象按名字懒加载并缓存。当前 suite 永远从 self.cfg.suite 读：
+        # serve 模式下 BenchSession 会把 adapter.cfg 换成本次 run 的 cfg。
+        self._suites: dict[str, Any] = {}
+        # 默认 suite 和白名单里每个名字都在启动时校验：写错要当场炸，
+        # 不能等到某次 run 换过去才发现
+        allowed = getattr(cfg, "allowed_suites", None)
+        for name in allowed() if callable(allowed) else [cfg.suite]:
+            self._load_suite(name)
 
+        # 下面三份缓存的键都是 (suite, task_id)。只按 task_id 缓存的话，
+        # 先跑 libero_10 的 task 3 再跑 libero_spatial 的 task 3 会复用上一个
+        # suite 的 env / init state / 布局，分数照出、不报任何错。
         self._env = None
-        self._env_task_id: int | None = None
-        self._init_states_cache: dict[int, np.ndarray] = {}
-        self._task_layout: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+        self._env_key: tuple[str, int] | None = None
+        self._init_states_cache: dict[tuple[str, int], np.ndarray] = {}
+        self._task_layout: dict[tuple[str, int], tuple[np.ndarray, np.ndarray]] = {}
+
+    # ---- suite ----
+
+    def _load_suite(self, name: str):
+        if name not in self._suites:
+            factory = self._benchmark_dict.get(name)
+            if factory is None:
+                raise ValueError(
+                    f"未知 LIBERO suite {name!r}；可用: {sorted(self._benchmark_dict)}"
+                )
+            self._suites[name] = factory()
+        return self._suites[name]
+
+    @property
+    def suite(self):
+        """当前 suite 对象（= self.cfg.suite）。"""
+        return self._load_suite(self.cfg.suite)
+
+    def suite_view(self, name: str) -> "_SuiteView":
+        """某个 suite 的只读清单视图，供 describe / plan 校验用，不碰 env。"""
+        return _SuiteView(self, name)
 
     # ---- 给结果文件的复现口径 ----
 
@@ -95,26 +127,37 @@ class LiberoAdapter:
 
     @property
     def num_tasks(self) -> int:
-        return len(self.suite.tasks)
+        return self._num_tasks(self.cfg.suite)
 
     def num_init_states(self, task_id: int) -> int:
-        return int(np.asarray(self._init_states(task_id)).shape[0])
+        return self._num_init_states(self.cfg.suite, task_id)
 
     def task_language(self, task_id: int) -> str:
-        return str(self.suite.get_task(task_id).language)
+        return self._task_language(self.cfg.suite, task_id)
 
-    def _init_states(self, task_id: int) -> np.ndarray:
-        if task_id not in self._init_states_cache:
-            self._init_states_cache[task_id] = np.asarray(
-                self.suite.get_task_init_states(task_id)
+    def _num_tasks(self, suite: str) -> int:
+        return len(self._load_suite(suite).tasks)
+
+    def _num_init_states(self, suite: str, task_id: int) -> int:
+        return int(np.asarray(self._init_states(task_id, suite)).shape[0])
+
+    def _task_language(self, suite: str, task_id: int) -> str:
+        return str(self._load_suite(suite).get_task(task_id).language)
+
+    def _init_states(self, task_id: int, suite: str | None = None) -> np.ndarray:
+        key = (suite or self.cfg.suite, task_id)
+        if key not in self._init_states_cache:
+            self._init_states_cache[key] = np.asarray(
+                self._load_suite(key[0]).get_task_init_states(task_id)
             )
-        return self._init_states_cache[task_id]
+        return self._init_states_cache[key]
 
     # ---- env 生命周期 ----
 
     def _ensure_env(self, task_id: int):
-        """同一个 task 复用 env；换 task 才重建（建 env 约 2s）。"""
-        if self._env is not None and self._env_task_id == task_id:
+        """同一个 (suite, task) 复用 env；换任何一个就重建（建 env 约 2s）。"""
+        key = (self.cfg.suite, task_id)
+        if self._env is not None and self._env_key == key:
             return self._env
 
         self.close()
@@ -131,7 +174,7 @@ class LiberoAdapter:
         )
         env.seed(self.cfg.seed)
         self._env = env
-        self._env_task_id = task_id
+        self._env_key = key
         return env
 
     # ---- 场景布局：fixture 位姿在 model 里，不在 state 里 ----
@@ -171,9 +214,10 @@ class LiberoAdapter:
         env.reset()
 
         if self.cfg.layout_mode == "fixed":
-            layout = self._task_layout.get(task_id)
+            layout_key = (self.cfg.suite, task_id)
+            layout = self._task_layout.get(layout_key)
             if layout is None:
-                self._task_layout[task_id] = self.capture_layout()
+                self._task_layout[layout_key] = self.capture_layout()
             else:
                 self.restore_layout(layout)
 
@@ -224,7 +268,7 @@ class LiberoAdapter:
             except Exception:  # noqa: BLE001 关闭失败不该影响批次收尾
                 pass
         self._env = None
-        self._env_task_id = None
+        self._env_key = None
 
     def _require_env(self):
         if self._env is None:
@@ -262,3 +306,30 @@ class LiberoAdapter:
                 np.asarray(obs["robot0_eye_in_hand_image"], dtype=np.uint8)[::-1, ::-1]
             ),
         }
+
+
+class _SuiteView:
+    """LiberoAdapter 在某个 suite 上的只读清单视图。
+
+    只回答 describe / plan 校验要问的问题（task 数、init state 数、指令），
+    不建 env、不改 adapter.cfg。其余属性（action_dim、state_joint_names、
+    reproducibility…）与 suite 无关，原样转给 adapter。
+    """
+
+    def __init__(self, adapter: LiberoAdapter, suite: str) -> None:
+        adapter._load_suite(suite)  # 名字不对当场抛 ValueError
+        self._adapter = adapter
+        self.suite_name = suite
+
+    @property
+    def num_tasks(self) -> int:
+        return self._adapter._num_tasks(self.suite_name)
+
+    def num_init_states(self, task_id: int) -> int:
+        return self._adapter._num_init_states(self.suite_name, task_id)
+
+    def task_language(self, task_id: int) -> str:
+        return self._adapter._task_language(self.suite_name, task_id)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._adapter, name)

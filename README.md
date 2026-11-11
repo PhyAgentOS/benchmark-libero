@@ -600,6 +600,15 @@ Call `describe` before `run`. Session uses stop at episode boundaries; neither a
 is terminal. Results include primary_metric, success_rate, successes, total_episodes, completed_episodes,
 result_path and episode details; see [result assembly](bench_tool/result_shape.py).
 
+Both `describe` and `run` accept an optional `suite` argument; omitting it selects the configured
+default `suite`. Selectable suites come from the `suites` allowlist in the config (omitted = default
+suite only); any other name is rejected synchronously with `BENCH_INVALID_ARGUMENT`. Checkpoints are
+usually trained on a subset of suites, and running an untrained suite does not fail, it just scores 0.
+`describe` returns a `suites` field, and `tasks` / `defaults.max_steps` follow the selected suite.
+For a non-default suite, the `max_steps` default comes from `max_steps_by_suite`, then the official
+LIBERO budget (spatial 220 / object 280 / goal 300 / libero_10 520 / libero_90 400); the default suite
+keeps `max_steps`. Result file names and episode IDs use the suite of that run.
+
 ### 10.1 Build the standalone Node
 
 From the repository root:

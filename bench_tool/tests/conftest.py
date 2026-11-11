@@ -31,6 +31,7 @@ _spec.loader.exec_module(_core_conftest)
 JOINTS = _core_conftest.JOINTS
 FakeAdapter = _core_conftest.FakeAdapter
 FakeNode = _core_conftest.FakeNode
+MultiSuiteAdapter = _core_conftest.MultiSuiteAdapter
 drive = _core_conftest.drive
 make_plan = _core_conftest.make_plan
 

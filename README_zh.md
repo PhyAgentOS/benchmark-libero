@@ -563,6 +563,14 @@ accepted/stop accepted 都不是终态。结果包含 primary_metric、success_r
 total_episodes、completed_episodes、result_path 和 episode 明细，具体形状见
 [结果组装](bench_tool/result_shape.py)。
 
+`describe` 和 `run` 都接受可选参数 `suite`，不传就是配置里的默认 `suite`。可选的 suite
+由配置里的 `suites` 白名单决定（不写 = 只有默认 suite），白名单外的名字同步拒绝为
+`BENCH_INVALID_ARGUMENT`。原因是权重通常只在部分 suite 上训练过，换到没训练过的 suite
+不会报错，只会得 0 分。`describe` 的输出带 `suites` 字段，`tasks` 和 `defaults.max_steps`
+按所选 suite 给出。非默认 suite 的 `max_steps` 默认值依次取 `max_steps_by_suite`、LIBERO
+官方口径（spatial 220 / object 280 / goal 300 / libero_10 520 / libero_90 400）；默认 suite
+仍用 `max_steps`。结果文件名和 episode_id 用本次 run 的 suite。
+
 ### 10.1 构建独立 Node
 
 在仓库根目录执行：

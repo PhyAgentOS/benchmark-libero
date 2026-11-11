@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import ClassVar
 
 def _import_core(name):
     """导 _core.<name>；父目录只临时挂上，避免遮蔽同名仿真器包（见 main.py 注释）。"""
@@ -58,6 +59,16 @@ class LiberoConfig(BaseBenchmarkConfig):
     # "状态"，set_init_state 只恢复 qpos/qvel 恢复不到。三种口径见 README §7 坑 1。
     layout_mode: str = "per_episode"
     policy_id: str = "vla_jepa_libero"
+
+    # LIBERO 官方评测（OpenVLA / openpi 的 eval 脚本）各 suite 的 max_steps。
+    # 只在 run 换到非默认 suite、且配置没写 max_steps_by_suite 时生效。
+    BUILTIN_MAX_STEPS: ClassVar[dict[str, int]] = {
+        "libero_spatial": 220,
+        "libero_object": 280,
+        "libero_goal": 300,
+        "libero_10": 520,
+        "libero_90": 400,
+    }
 
 
 def load_config(path: str | Path) -> LiberoConfig:
