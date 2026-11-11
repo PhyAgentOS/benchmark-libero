@@ -1,7 +1,6 @@
 {
   "repository": "benchmark-libero",
   "node_candidate_version": "2.0.0",
-  "baseline_commit": "e1eb5b6c398c04065911336075efe30091d9570c",
   "changes": [
     "Upgrade node dependencies and standalone build dependency pins.",
     "Synchronize English/Chinese root README guidance and frozen dependencies."
