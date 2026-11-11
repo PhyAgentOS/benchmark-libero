@@ -12,7 +12,48 @@
     ]
   },
   "dora_cli": "1.0.1",
-  "runtime_records": [],
+  "runtime_records": [
+    {
+      "repo": "benchmark-libero",
+      "entry": "libero-benchmark",
+      "mode": "chain",
+      "command": [
+        "${WORKSPACE}/.test-env/bin/dora",
+        "run",
+        "${WORKSPACE}/validation/forge2/runtime-blocked/libero-benchmark/chain/dataflow.yaml",
+        "--stop-after",
+        "4s"
+      ],
+      "includes_gateway": true,
+      "exit_code": 1,
+      "passed": false,
+      "status": "blocked / not accepted",
+      "elapsed_seconds": 1.382,
+      "error": null,
+      "scope": "Negative prerequisite diagnostic with unavailable local hardware endpoints, no physical actuation or remote SSH, and no model downloads. Not a successful node-operation or compatibility result.",
+      "log_file": "validation/forge2/runtime-blocked/libero-benchmark/chain/dora.log"
+    },
+    {
+      "repo": "benchmark-libero",
+      "entry": "libero-benchmark",
+      "mode": "single",
+      "command": [
+        "${WORKSPACE}/.test-env/bin/dora",
+        "run",
+        "${WORKSPACE}/validation/forge2/runtime-blocked/libero-benchmark/single/dataflow.yaml",
+        "--stop-after",
+        "4s"
+      ],
+      "includes_gateway": false,
+      "exit_code": 1,
+      "passed": false,
+      "status": "blocked / not accepted",
+      "elapsed_seconds": 1.339,
+      "error": null,
+      "scope": "Negative prerequisite diagnostic with unavailable local hardware endpoints, no physical actuation or remote SSH, and no model downloads. Not a successful node-operation or compatibility result.",
+      "log_file": "validation/forge2/runtime-blocked/libero-benchmark/single/dora.log"
+    }
+  ],
   "runtime_missing": "LIBERO/robosuite simulator environment is unavailable; production benchmark Dora and Gateway chain are pending.",
   "acceptance": "Pending final platform artifacts, applicable hardware/model execution and rollback/sustained-run gates.",
   "pillow_dependency": "Node locks currently resolve published Forge Msgs 2.0.0. Security audit remains dependent on Forge PR #3 and a published security-fixed Msgs release; no vulnerability suppression was added.",
