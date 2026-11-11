@@ -1,0 +1,21 @@
+{
+  "repository": "benchmark-libero",
+  "node_candidate_version": "2.0.0",
+  "baseline_commit": "e1eb5b6c398c04065911336075efe30091d9570c",
+  "changes": [
+    "Upgrade node dependencies and standalone build dependency pins.",
+    "Synchronize English/Chinese root README guidance and frozen dependencies."
+  ],
+  "software_tests": {
+    "log": "ci-tests.log",
+    "summary": [
+      "63 passed in 0.08s"
+    ]
+  },
+  "dora_cli": "1.0.1",
+  "runtime_records": [],
+  "runtime_missing": "LIBERO/robosuite simulator environment is unavailable; production benchmark Dora and Gateway chain are pending.",
+  "acceptance": "Pending final platform artifacts, applicable hardware/model execution and rollback/sustained-run gates.",
+  "pillow_dependency": "Node locks currently resolve published Forge Msgs 2.0.0. Security audit remains dependent on Forge PR #3 and a published security-fixed Msgs release; no vulnerability suppression was added.",
+  "gitlab_synchronization": "Not started; follows full acceptance."
+}

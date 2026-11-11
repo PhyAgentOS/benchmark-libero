@@ -8,7 +8,7 @@ NODE_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 DIST_DIR=$NODE_ROOT/dist
 WORK_DIR=$NODE_ROOT/build/pyinstaller
 PYTHON_BIN=${PYTHON_BIN:-python3.12}
-VERSION=1.0.0
+VERSION=$($PYTHON_BIN -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
 
 if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
     echo "ERROR: python3.12 was not found; set PYTHON_BIN in this script or invoke it with a compatible shell" >&2
@@ -36,9 +36,9 @@ echo "==> creating isolated PyInstaller environment"
     --disable-pip-version-check \
     --no-input \
     pyinstaller==6.19.0 \
-    dora-rs==0.4.1 \
-    forge-msgs==1.2.0 \
-    forge-tool==1.0.0 \
+    dora-rs==1.0.1 \
+    forge-msgs==2.0.0 \
+    forge-tool==2.0.0 \
     pyarrow==23.0.1 \
     pydantic==2.12.5 \
     pyyaml==6.0.3

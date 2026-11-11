@@ -61,7 +61,7 @@ Read the terminal invocation result for the final outcome.
 Implementation: [main.py](main.py), [descriptor](bench_tool/descriptor.py),
 [Endpoint methods](bench_tool/endpoints.py), [Dora loop](bench_tool/node.py).
 
-Compatibility: current dependency declarations are `dora-rs==0.4.1`, `forge-msgs==1.2.0`, `forge-tool[dora]==1.0.0`. See [pyproject.toml](pyproject.toml) and [uv.lock](uv.lock). These declarations do not guarantee cross-version interoperability; also check the build revision and Skill lock when using artifacts.
+Compatibility: current dependency declarations are `dora-rs>=1.0.1,<2`, `forge-msgs>=2.0.0,<3`, `forge-tool[dora]>=2.0.0,<3`. See [pyproject.toml](pyproject.toml) and [uv.lock](uv.lock). These declarations do not guarantee cross-version interoperability; also check the build revision and Skill lock when using artifacts.
 
 Changes to Node entrypoints, Endpoints or Tool APIs must update this section and the associated configuration/contracts. Follow the [Node README contract](https://github.com/PhyAgentOS/forge/blob/master/CONTRIBUTING.md#node-readme-contract).
 
@@ -652,3 +652,9 @@ this version. Configure Query/Session ToolSpecs and provider channels in Gateway
 Skill-locked binary capability.
 
 The benchmark Node computes scores/results; Gateway/agent neither substitutes its own scoring nor aggregates across invocations.
+
+## Forge 2.x migration
+
+This branch prepares node version `2.0.0` for Dora 1.x, frozen to Dora `1.0.1` for migration validation. It uses the official Forge 2.x distributions; Common is at least `2.1.0`. Regenerated locks and all executable entrypoints are part of the change.
+
+Every change report must list repository, changes and test evidence, including per-node `dora run` records and a chained test containing `adapter-forge-gateway`. Unavailable hardware/model checks remain pending. Source PRs do not publish stable releases or synchronize GitLab; synchronization follows full acceptance.
