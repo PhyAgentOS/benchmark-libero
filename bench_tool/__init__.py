@@ -12,6 +12,6 @@
 依赖方向：bench_tool → _core，_core 不反向依赖。
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 __all__ = ["__version__"]

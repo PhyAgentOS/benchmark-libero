@@ -14,6 +14,7 @@ from dataclasses import replace
 from typing import Any
 
 from .config import BaseBenchmarkConfig, resolve_and_validate_plan
+from .adapter import expected_action_dim
 from .runner import BenchmarkRunner
 
 
@@ -47,18 +48,39 @@ def _camera_ids(cfg: BaseBenchmarkConfig, adapter: Any) -> list[str]:
     return []
 
 
+def plan_source(adapter: Any, suite: str) -> Any:
+    """给"某个 suite"的清单查询找对象。
+
+    adapter 有 `suite_view(suite)` 钩子就用它拿一个只读视图（LIBERO 实现了）；
+    没有这个钩子的 benchmark 只支持一个 suite，直接用 adapter 本身。
+    """
+    hook = getattr(adapter, "suite_view", None)
+    return hook(suite) if callable(hook) else adapter
+
+
 def capabilities_payload(
     cfg: BaseBenchmarkConfig,
     adapter: Any,
     *,
     limits: dict[str, int] | None = None,
+    suite: str | None = None,
 ) -> dict[str, Any]:
     """benchmark.controller/describe 的数据源，进程内直读 —— 没有缓存/心跳/过期
     问题，一次 describe 就是一次真实快照。
 
+    `suite` 为空 = 配置里的默认 suite。只能取 `cfg.allowed_suites()` 里的名字。
+
     benchmark 特有的口径（LIBERO 的 layout_mode/control_mode 之类）一律走
     `adapter.reproducibility()` 原样透传，_core 不认识它们。
     """
+    suite = suite or cfg.suite
+    allowed = cfg.allowed_suites()
+    if suite not in allowed:
+        raise ValueError(f"suite {suite!r} 不在本配置允许的 suites {allowed} 里")
+    if suite != cfg.suite and not callable(getattr(adapter, "suite_view", None)):
+        raise ValueError(f"adapter 不支持切换 suite，只能跑 {cfg.suite!r}")
+    adapter = plan_source(adapter, suite)
+
     names = getattr(adapter, "tasks", None)
     tasks: list[dict[str, Any]] = []
     for task_id in range(adapter.num_tasks):
@@ -82,16 +104,18 @@ def capabilities_payload(
 
     return {
         "benchmark": cfg.benchmark,
-        "suite": cfg.suite,
+        "suite": suite,
+        "suites": allowed,
         "policy_id": cfg.policy_id,
         "num_tasks": int(adapter.num_tasks),
         "tasks": tasks,
         "joint_names": list(adapter.state_joint_names()),
+        "action_dim": expected_action_dim(adapter),
         "camera_ids": _camera_ids(cfg, adapter),
         "defaults": {
             "num_runs": cfg.num_runs,
             "seed": cfg.seed,
-            "max_steps": cfg.max_steps,
+            "max_steps": cfg.default_max_steps(suite),
         },
         "limits": dict(limits or {}),
         "reproducibility": reproducibility,
@@ -120,8 +144,13 @@ class BenchSession:
     ) -> None:
         self.invocation_id = invocation_id
         self._log = log
+        suite = str(plan.get("suite") or cfg_template.suite)
+        allowed = cfg_template.allowed_suites()
+        if suite not in allowed:
+            raise ValueError(f"suite {suite!r} 不在本配置允许的 suites {allowed} 里")
         self.cfg = replace(
             cfg_template,
+            suite=suite,
             task_ids=[int(t) for t in plan["task_ids"]],
             init_state_ids=[int(i) for i in plan["init_state_ids"]],
             num_runs=int(plan["num_runs"]),
@@ -131,7 +160,9 @@ class BenchSession:
         # 权威兜底校验。endpoint 侧拿 capabilities 也校验了一遍，但那份可能
         # 与 adapter 的真实清单不一致；这里抛出来会被上层转成同步拒绝，
         # 而不是"跑起来之后失败"。
-        resolve_and_validate_plan(self.cfg, adapter)
+        # 必须对**本次的 suite** 校验：adapter.cfg 此刻还指着上一次 session，
+        # 直接问 adapter 拿到的是上一个 suite 的 task 数。
+        resolve_and_validate_plan(self.cfg, plan_source(adapter, suite))
 
         # **adapter 会回读 cfg，必须让它和 runner 看的是同一个对象。**
         # LiberoAdapter 在构造时存了 `self.cfg`，并在 reset_episode / _ensure_env
@@ -198,4 +229,4 @@ class BenchSession:
         }
 
 
-__all__ = ["BenchSession", "bench_limits", "capabilities_payload"]
+__all__ = ["BenchSession", "bench_limits", "capabilities_payload", "plan_source"]

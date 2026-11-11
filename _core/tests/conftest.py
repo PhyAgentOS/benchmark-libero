@@ -51,6 +51,8 @@ class FakeAdapter:
     """
 
     RECORD_FPS = 20.0
+    # 环境动作契约：与 drive() 喂的零动作同维度。
+    action_dim: int | None = len(JOINTS)
 
     def __init__(self, *, succeed: bool = True, steps_per_episode: int = 2) -> None:
         self.succeed = succeed
@@ -125,6 +127,68 @@ class NoCfgAdapter(FakeAdapter):
     def __init__(self, **kw: Any) -> None:
         super().__init__(**kw)
         del self.cfg
+
+
+# 多 suite 的假清单：suite → 每个 task 的 init state 数。
+# 两个 suite 的 task 数与 init state 数都故意不同，换错 suite 一定能被校验看出来。
+MULTI_SUITES: dict[str, list[int]] = {
+    "fake_suite": [3, 2],
+    "big_suite": [1, 1, 4],
+}
+
+
+class MultiSuiteAdapter(FakeAdapter):
+    """带 `suite_view` 钩子的 FakeAdapter，清单跟着 `cfg.suite` 走（同 LiberoAdapter）。
+
+    `reset_episode` 额外记下当时 `cfg.suite`，用来证明本次 run 的 suite 真的到了 adapter。
+    """
+
+    def _counts(self, suite: str | None) -> list[int]:
+        return MULTI_SUITES[suite or "fake_suite"]
+
+    @property
+    def num_tasks(self) -> int:
+        return len(self._counts(getattr(self.cfg, "suite", None)))
+
+    def num_init_states(self, task_id: int) -> int:
+        return self._counts(getattr(self.cfg, "suite", None))[task_id]
+
+    @property
+    def tasks(self) -> list[str]:
+        return [f"task{i}" for i in range(self.num_tasks)]
+
+    def suite_view(self, suite: str) -> "_FakeSuiteView":
+        if suite not in MULTI_SUITES:
+            raise ValueError(f"未知 suite {suite!r}")
+        return _FakeSuiteView(self, suite)
+
+    def reset_episode(self, task_id, init_state_id, run_index, episode_seed):
+        obs = super().reset_episode(task_id, init_state_id, run_index, episode_seed)
+        self.resets[-1]["cfg_suite"] = getattr(self.cfg, "suite", None)
+        return obs
+
+
+class _FakeSuiteView:
+    def __init__(self, adapter: MultiSuiteAdapter, suite: str) -> None:
+        self._adapter = adapter
+        self._counts = MULTI_SUITES[suite]
+
+    @property
+    def num_tasks(self) -> int:
+        return len(self._counts)
+
+    def num_init_states(self, task_id: int) -> int:
+        return self._counts[task_id]
+
+    def task_language(self, task_id: int) -> str:
+        return f"view task {task_id}"
+
+    @property
+    def tasks(self) -> list[str]:
+        return [f"task{i}" for i in range(len(self._counts))]
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._adapter, name)
 
 
 @pytest.fixture

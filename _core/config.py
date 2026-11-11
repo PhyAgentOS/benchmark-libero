@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, ClassVar, Iterable
 
 import yaml
 
@@ -32,6 +32,19 @@ def parse_id_list(spec: Any, default: Iterable[int]) -> list[int]:
             out.extend(range(int(lo), int(hi) + 1))
         else:
             out.append(int(part))
+    return out
+
+
+def _parse_name_list(spec: Any) -> list[str]:
+    """suite 名单：None / "" → []；"a,b" 或 [a, b] → 去重保序的列表。"""
+    if spec is None or spec == "":
+        return []
+    items = spec if isinstance(spec, (list, tuple)) else str(spec).split(",")
+    out: list[str] = []
+    for item in items:
+        name = str(item).strip()
+        if name and name not in out:
+            out.append(name)
     return out
 
 
@@ -78,6 +91,32 @@ class BaseBenchmarkConfig:
     max_total_episodes: int = 0
     max_max_steps: int = 0
 
+    # ---- 多 suite（serve 模式下 run 可按次指定 suite）----
+    # `suites` 是本配置（≈ 一组权重）允许跑的 suite 白名单。空 = 只允许 `suite`，
+    # 与改造前逐字一致。很多权重只在单个 suite 上训练，跑白名单外的 suite 不报错
+    # 但分数是 0，所以白名单外一律拒绝。
+    suites: list[str] = field(default_factory=list)
+    # 按 suite 覆盖默认 max_steps。查找顺序见 default_max_steps()。
+    max_steps_by_suite: dict[str, int] = field(default_factory=dict)
+    # 各 benchmark 自己的官方步数口径（子类覆盖）；ClassVar 不进 dataclass 字段。
+    BUILTIN_MAX_STEPS: ClassVar[dict[str, int]] = {}
+
+    def allowed_suites(self) -> list[str]:
+        return list(self.suites) if self.suites else [self.suite]
+
+    def default_max_steps(self, suite: str | None = None) -> int:
+        """某个 suite 的默认 max_steps。
+
+        顺序：配置里的 max_steps_by_suite → 默认 suite 用 `max_steps`（保持旧
+        profile 的数值不变）→ benchmark 官方口径 → `max_steps`。
+        """
+        name = suite or self.suite
+        if name in self.max_steps_by_suite:
+            return int(self.max_steps_by_suite[name])
+        if name == self.suite:
+            return int(self.max_steps)
+        return int(self.BUILTIN_MAX_STEPS.get(name, self.max_steps))
+
     @property
     def total_episodes(self) -> int:
         return len(self.task_ids) * len(self.init_state_ids) * self.num_runs
@@ -112,10 +151,21 @@ def fill_base(cfg: BaseBenchmarkConfig, data: dict[str, Any]) -> BaseBenchmarkCo
     cfg.max_total_episodes = int(data.get("max_total_episodes", cfg.max_total_episodes))
     cfg.max_max_steps = int(data.get("max_max_steps", cfg.max_max_steps))
 
+    cfg.suites = _parse_name_list(data.get("suites"))
+    raw_steps = data.get("max_steps_by_suite") or {}
+    if not isinstance(raw_steps, dict):
+        raise ValueError(f"max_steps_by_suite 必须是 suite→步数 的映射，收到 {raw_steps!r}")
+    cfg.max_steps_by_suite = {str(k): int(v) for k, v in raw_steps.items()}
+
     if cfg.num_runs < 1:
         raise ValueError(f"num_runs 必须 ≥1，收到 {cfg.num_runs}")
     if cfg.max_steps < 1:
         raise ValueError(f"max_steps 必须 ≥1，收到 {cfg.max_steps}")
+    if cfg.suites and cfg.suite not in cfg.suites:
+        raise ValueError(f"suites 必须包含默认 suite {cfg.suite!r}，收到 {cfg.suites}")
+    bad_steps = {k: v for k, v in cfg.max_steps_by_suite.items() if v < 1}
+    if bad_steps:
+        raise ValueError(f"max_steps_by_suite 的步数必须 ≥1，收到 {bad_steps}")
 
     # task/init_state 的默认全集由 adapter 在拿到 suite 后回填（见 resolve_and_validate_plan）
     cfg.task_ids = parse_id_list(data.get("task_ids"), [])

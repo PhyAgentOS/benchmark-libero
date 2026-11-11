@@ -10,6 +10,7 @@ await 外部 I/O，也不碰 dora —— 这是从 bench_endpoint 双节点架�
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -44,10 +45,12 @@ from .result_shape import outputs_from_result, stopped_summary
 _DESCRIBE_FIELDS = (
     "benchmark",
     "suite",
+    "suites",
     "policy_id",
     "num_tasks",
     "tasks",
     "joint_names",
+    "action_dim",
     "camera_ids",
     "defaults",
     "limits",
@@ -72,14 +75,44 @@ class SessionHandle:
     reported: bool = False
 
 
+CapsLookup = Callable[[str], dict[str, Any]]
+
+
+def select_capabilities(
+    arguments: Mapping[str, Any],
+    caps: dict[str, Any],
+    caps_for: CapsLookup | None,
+) -> dict[str, Any]:
+    """按参数里的 `suite` 选 capabilities；不传 = 默认 suite（就是 caps 本身）。
+
+    白名单外的 suite 在这里同步拒绝。白名单来自配置（caps["suites"]），
+    不是 LIBERO 的全集：很多权重只训练了单个 suite，换过去分数是 0 且不报错。
+    """
+    suite = arguments.get("suite")
+    if suite is None or suite == caps.get("suite"):
+        return caps
+    allowed = list(caps.get("suites") or [caps.get("suite")])
+    if not isinstance(suite, str) or suite not in allowed or caps_for is None:
+        raise endpoint_error(
+            ERR_INVALID_ARGUMENT,
+            f"suite {suite!r} 不可用；本 profile 允许: {allowed}",
+            details={"available_suites": allowed},
+        )
+    try:
+        return caps_for(suite)
+    except ValueError as exc:
+        raise endpoint_error(ERR_INVALID_ARGUMENT, f"{type(exc).__name__}: {exc}") from None
+
+
 class BenchDescribeEndpoint:
     """QueryToolEndpoint：进程内直读 capabilities，永不等待。"""
 
-    def __init__(self, caps: dict[str, Any]) -> None:
+    def __init__(self, caps: dict[str, Any], caps_for: CapsLookup | None = None) -> None:
         self.caps = caps
+        self.caps_for = caps_for
 
     async def query(self, request: ToolRequest, context: ToolContext) -> ToolResult:
-        caps = self.caps or {}
+        caps = select_capabilities(dict(request.arguments or {}), self.caps or {}, self.caps_for)
         outputs = {name: caps.get(name) for name in _DESCRIBE_FIELDS if name in caps}
         return ToolResult(status="succeeded", outputs=outputs)
 
@@ -97,12 +130,14 @@ class BenchSessionEndpoint:
         *,
         emit: Callable[[SessionHandle, ToolEvent], None],
         log: Callable[[str], None] = print,
+        caps_for: CapsLookup | None = None,
     ) -> None:
         self.table = table
         self.node = node
         self.cfg = cfg
         self.adapter = adapter
         self.caps = caps
+        self.caps_for = caps_for
         self._emit = emit
         self._log = log
         self._handles: dict[str, SessionHandle] = {}
@@ -153,7 +188,14 @@ class BenchSessionEndpoint:
             error = tool_error(
                 "BENCH_RUN_FAILED",
                 failure_summary or "批次未正常结束",
-                details={"status": result.status},
+                details={
+                    "status": result.status,
+                    **(
+                        {"error_code": handle.session.runner.failure_code}
+                        if handle.session.runner.failure_code
+                        else {}
+                    ),
+                },
             )
         self.table.finish(handle.key.invocation_id, phase, outputs=outputs, error=error)
 
@@ -211,7 +253,9 @@ class BenchSessionEndpoint:
                 details={"active_invocation_id": active.key.invocation_id},
             )
 
-        plan = normalize_plan(dict(request.arguments), self.caps)
+        arguments = dict(request.arguments)
+        caps = select_capabilities(arguments, self.caps, self.caps_for)
+        plan = normalize_plan(arguments, caps)
 
         # ⚠️ 这行以下就有副作用了（session 进队列、adapter.cfg 被回写），
         # 再往后不许抛 ToolEndpointError。BenchSession 内部还有一道权威兜底
@@ -346,7 +390,7 @@ def normalize_plan(arguments: dict[str, Any], capabilities: dict[str, Any]) -> d
             ERR_INVALID_ARGUMENT, f"max_steps {max_steps} 超过上限 {cap_steps}"
         )
 
-    return {
+    plan = {
         "task_ids": task_ids,
         "init_state_ids": init_state_ids,
         "num_runs": num_runs,
@@ -354,6 +398,17 @@ def normalize_plan(arguments: dict[str, Any], capabilities: dict[str, Any]) -> d
         "max_steps": max_steps,
         "total_episodes": total,
     }
+    # suite 跟着 capabilities 走（select_capabilities 已经按参数选好了）。
+    # 没有 suite 字段的旧 capabilities 不加这个键，BenchSession 回落到默认 suite。
+    if capabilities.get("suite"):
+        plan["suite"] = str(capabilities["suite"])
+    return plan
 
 
-__all__ = ["BenchDescribeEndpoint", "BenchSessionEndpoint", "SessionHandle", "normalize_plan"]
+__all__ = [
+    "BenchDescribeEndpoint",
+    "BenchSessionEndpoint",
+    "SessionHandle",
+    "normalize_plan",
+    "select_capabilities",
+]
