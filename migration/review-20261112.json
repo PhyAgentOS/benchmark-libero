@@ -1,0 +1,55 @@
+{
+  "review_date": "2026-11-12",
+  "merge_recommendation": "hold",
+  "full_acceptance_complete": false,
+  "gitlab_sync": "not started; acceptance pending",
+  "repository": "benchmark-libero",
+  "changes": [
+    "Resolve build version from the absolute repository pyproject path after validating PYTHON_BIN."
+  ],
+  "software_tests": {
+    "shell_syntax": "passed",
+    "outside_repository_version_lookup": "passed; then expected LIBERO SDK prerequisite failure",
+    "existing_suite": "63 passed previously; no node behavior change in this round"
+  },
+  "runtime_records": [
+    {
+      "entry": "libero",
+      "mode": "single",
+      "command": [
+        "${WORKSPACE}/.test-env/bin/dora",
+        "run",
+        "${WORKSPACE}/validation/review-20261112/single/libero/dataflow.yaml",
+        "--stop-after",
+        "4s"
+      ],
+      "exit_code": 1,
+      "elapsed_seconds": 1.311,
+      "passed": false,
+      "expected_negative_confirmed": true,
+      "scope": "Negative missing LIBERO SDK prerequisite; not a successful benchmark run.",
+      "log_file": "${WORKSPACE}/validation/review-20261112/single/libero/dora.log"
+    },
+    {
+      "entry": "libero",
+      "mode": "chain",
+      "command": [
+        "${WORKSPACE}/.test-env/bin/dora",
+        "run",
+        "${WORKSPACE}/validation/review-20261112/blocked-chain/libero/dataflow.yaml",
+        "--stop-after",
+        "4s"
+      ],
+      "includes_gateway": true,
+      "exit_code": 1,
+      "elapsed_seconds": 1.103,
+      "passed": false,
+      "scope": "Blocked platform/SDK prerequisite diagnostic; not successful transport or hardware acceptance.",
+      "log_file": "${WORKSPACE}/validation/review-20261112/blocked-chain/libero/dora.log"
+    }
+  ],
+  "blockers": [
+    "Published forge-msgs 2.0.0 still constrains Pillow below 13; lock retains Pillow 12.3.0.",
+    "LIBERO SDK is unavailable; single and Gateway chain startup are negative prerequisite records, not successful benchmark operation."
+  ]
+}

@@ -8,12 +8,13 @@ NODE_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 DIST_DIR=$NODE_ROOT/dist
 WORK_DIR=$NODE_ROOT/build/pyinstaller
 PYTHON_BIN=${PYTHON_BIN:-python3.12}
-VERSION=$($PYTHON_BIN -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
 
 if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
     echo "ERROR: python3.12 was not found; set PYTHON_BIN in this script or invoke it with a compatible shell" >&2
     exit 1
 fi
+
+VERSION=$("$PYTHON_BIN" -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["project"]["version"])' "$NODE_ROOT/pyproject.toml")
 
 "$PYTHON_BIN" - <<'PY'
 import importlib
