@@ -38,7 +38,7 @@ echo "==> creating isolated PyInstaller environment"
     --no-input \
     pyinstaller==6.19.0 \
     dora-rs==1.0.1 \
-    forge-msgs==2.0.0 \
+    forge-msgs==2.1.0 \
     forge-tool==2.0.0 \
     pyarrow==23.0.1 \
     pydantic==2.12.5 \

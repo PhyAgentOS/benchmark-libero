@@ -5,7 +5,7 @@ description = "Standalone LIBERO benchmark node for Forge"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "dora-rs>=1.0.1,<2",
-    "forge-msgs>=2.0.0,<3",
+    "forge-msgs>=2.1.0,<3",
     "forge-tool[dora]>=2.0.0,<3",
     "numpy",
     "pyarrow",
