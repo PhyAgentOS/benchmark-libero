@@ -1,0 +1,244 @@
+{
+  "repository": "benchmark-libero",
+  "round": "msgs-2.1.0 alignment / 2026-11-12",
+  "breaking_change": "Forge 1.x / Dora 0.4.x to Forge 2.x / Dora 1.x requires aligned Forge packages, runtime services, node peers and rebuilt artifacts. Forge families version independently. forge_msgs.v1 remains unchanged.",
+  "changes": [
+    "Update paired README deployment/version compatibility notice",
+    "Require Python forge-msgs >=2.1.0,<3 and lock public Msgs 2.1.0 / Pillow 13.0.0, preserving all other locked package versions",
+    "Update PyInstaller hard pin to forge-msgs==2.1.0."
+  ],
+  "lock_updates": [
+    {
+      "repo": "benchmark-libero",
+      "lock": "uv.lock",
+      "command": [
+        "${WORKSPACE}/.tools/bin/uv",
+        "lock",
+        "--upgrade-package",
+        "forge-msgs==2.1.0",
+        "--upgrade-package",
+        "pillow==13.0.0"
+      ],
+      "exit_code": 0,
+      "version_changes": [
+        {
+          "name": "forge-msgs",
+          "before": "2.0.0",
+          "after": "2.1.0"
+        },
+        {
+          "name": "pillow",
+          "before": "12.3.0",
+          "after": "13.0.0"
+        }
+      ]
+    }
+  ],
+  "lock_checks": [
+    {
+      "repo": "benchmark-libero",
+      "lock": "uv.lock",
+      "check_exit": 0
+    }
+  ],
+  "software_tests": {
+    "repo": "benchmark-libero",
+    "environment": "${WORKSPACE}/benchmark-libero/.venv/bin/python",
+    "commands": [
+      [
+        "${WORKSPACE}/.tools/bin/uv",
+        "pip",
+        "install",
+        "--python",
+        "${WORKSPACE}/benchmark-libero/.venv/bin/python",
+        "--no-deps",
+        "--index-url",
+        "https://pypi.org/simple",
+        "forge-msgs==2.1.0",
+        "pillow==13.0.0"
+      ],
+      [
+        "${WORKSPACE}/benchmark-libero/.venv/bin/python",
+        "-c",
+        "from importlib.metadata import version; import json; print(json.dumps({n:version(n) for n in ['forge-msgs','pillow','dora-rs']}))"
+      ],
+      [
+        "${WORKSPACE}/.tools/bin/uv",
+        "pip",
+        "check",
+        "--python",
+        "${WORKSPACE}/benchmark-libero/.venv/bin/python"
+      ],
+      [
+        "${WORKSPACE}/benchmark-libero/.venv/bin/python",
+        "-m",
+        "pytest",
+        "-q",
+        "--import-mode=importlib"
+      ],
+      [
+        "${WORKSPACE}/benchmark-libero/.venv/bin/python",
+        "-m",
+        "pytest",
+        "-q"
+      ]
+    ],
+    "scope": "Existing local test environment with exact public Msgs/Pillow update; platform SDK exclusions are reported, not production acceptance.",
+    "update_exit": 0,
+    "versions_exit": 0,
+    "dependency_check_exit": 0,
+    "tests_exit": 0,
+    "test_summary": [
+      "...............................................................          [100%]",
+      "63 passed in 0.14s"
+    ],
+    "retry_reason": "Use repository default import mode (test-local helper imports), or existing SDK-excluded portable environment.",
+    "installed_versions": {
+      "forge-msgs": "2.1.0",
+      "pillow": "13.0.0",
+      "dora-rs": "1.0.1"
+    }
+  },
+  "dependency_audit": {
+    "repo": "benchmark-libero",
+    "audit_exit": 0,
+    "findings": [],
+    "skipped": []
+  },
+  "dora_run_records": [
+    {
+      "repo": "benchmark-libero",
+      "entry": "libero-benchmark",
+      "mode": "chain",
+      "command": [
+        "${WORKSPACE}/.test-env/bin/dora",
+        "run",
+        "${WORKSPACE}/validation/downstream-msgs210-20261112/runtime-blocked/libero-benchmark/chain/dataflow.yaml",
+        "--stop-after",
+        "4s"
+      ],
+      "includes_gateway": true,
+      "exit_code": 1,
+      "passed": false,
+      "status": "blocked / not accepted",
+      "elapsed_seconds": 0.856,
+      "error": null,
+      "scope": "Negative startup diagnostic only. Hardware endpoints were replaced with absent local devices, actions disabled, remote SSH excluded and model downloads disabled. This does not demonstrate successful node operation.",
+      "log_tail": [
+        "              ^^^^^^^^^^^^^^^^^^",
+        "  File \"${WORKSPACE}/benchmark-libero/adapters/libero_adapter.py\", line 62, in __init__",
+        "    from libero.libero import benchmark, get_libero_path",
+        "ModuleNotFoundError: No module named 'libero'",
+        "---------------------------------------------------------------------------------",
+        "",
+        "",
+        "",
+        "There is 1 more consequential error. Check the `out/01a1ced0-470b-724e-b001-d7b89f9357ed` folder for full details.",
+        "",
+        "Location:",
+        "    binaries/cli/src/common.rs:55:17"
+      ],
+      "source_report": "runtime-blocked/libero-benchmark/chain/report.json",
+      "runtime_errors": [
+        "2026-11-12T08:11:58.770902Z ERROR node_failure: dora_daemon::spawn::prepared: node exited with error: ExitCode(1) node_id=target dataflow_id=01a1ced0-470b-724e-b001-d7b89f9357ed",
+        "16:11:58 ERROR  target: daemon exited with code 1 with stderr output:",
+        "16:11:59 stdout gateway: 2026-11-12 16:11:59 - forge_gateway.cli - ERROR - gateway startup failed: Could not initiate node from environment variable. For dynamic node, please add a node id in the initialization function.",
+        "2026-11-12T08:11:59.410300Z ERROR node_failure: dora_daemon::spawn::prepared: node exited with error: ExitCode(1) node_id=gateway dataflow_id=01a1ced0-470b-724e-b001-d7b89f9357ed",
+        "16:11:59 ERROR  gateway: daemon exited with code 1. This error occurred because node `target` exited before connecting to dora."
+      ],
+      "local_evidence": "Full original Dora log is retained under validation/downstream-msgs210-20261112/runtime-blocked/libero-benchmark/chain/dora.log"
+    },
+    {
+      "repo": "benchmark-libero",
+      "entry": "libero-benchmark",
+      "mode": "single",
+      "command": [
+        "${WORKSPACE}/.test-env/bin/dora",
+        "run",
+        "${WORKSPACE}/validation/downstream-msgs210-20261112/runtime-blocked/libero-benchmark/single/dataflow.yaml",
+        "--stop-after",
+        "4s"
+      ],
+      "includes_gateway": false,
+      "exit_code": 1,
+      "passed": false,
+      "status": "blocked / not accepted",
+      "elapsed_seconds": 0.588,
+      "error": null,
+      "scope": "Negative startup diagnostic only. Hardware endpoints were replaced with absent local devices, actions disabled, remote SSH excluded and model downloads disabled. This does not demonstrate successful node operation.",
+      "log_tail": [
+        "  File \"${WORKSPACE}/benchmark-libero/main.py\", line 39, in main",
+        "    adapter = LiberoAdapter(cfg)",
+        "              ^^^^^^^^^^^^^^^^^^",
+        "  File \"${WORKSPACE}/benchmark-libero/adapters/libero_adapter.py\", line 62, in __init__",
+        "    from libero.libero import benchmark, get_libero_path",
+        "ModuleNotFoundError: No module named 'libero'",
+        "---------------------------------------------------------------------------------",
+        "",
+        "",
+        "",
+        "Location:",
+        "    binaries/cli/src/common.rs:55:17"
+      ],
+      "source_report": "runtime-blocked/libero-benchmark/single/report.json",
+      "runtime_errors": [
+        "2026-11-12T08:11:58.505602Z ERROR node_failure: dora_daemon::spawn::prepared: node exited with error: ExitCode(1) node_id=target dataflow_id=01a1ced0-44ad-796b-bc56-27cb079d8b50",
+        "16:11:58 ERROR  target: daemon exited with code 1 with stderr output:"
+      ],
+      "local_evidence": "Full original Dora log is retained under validation/downstream-msgs210-20261112/runtime-blocked/libero-benchmark/single/dora.log"
+    },
+    {
+      "entry": "libero",
+      "mode": "single",
+      "command": [
+        "${WORKSPACE}/.test-env/bin/dora",
+        "run",
+        "${WORKSPACE}/validation/downstream-msgs210-20261112/review-single/libero/dataflow.yaml",
+        "--stop-after",
+        "4s"
+      ],
+      "exit_code": 1,
+      "elapsed_seconds": 0.524,
+      "passed": false,
+      "expected_negative_confirmed": true,
+      "scope": "Negative missing LIBERO SDK prerequisite; not a successful benchmark run.",
+      "repo": "benchmark-libero",
+      "source_report": "review-single/libero/report.json",
+      "runtime_errors": [
+        "2026-11-12T08:10:43.993084Z ERROR node_failure: dora_daemon::spawn::prepared: node exited with error: ExitCode(1) node_id=target dataflow_id=01a1cecf-21e2-7982-b250-dfe6fa7dcbf2",
+        "16:10:43 ERROR  target: daemon exited with code 1 with stderr output:"
+      ],
+      "local_evidence": "Full original Dora log is retained under validation/downstream-msgs210-20261112/review-single/libero/dora.log"
+    },
+    {
+      "entry": "libero",
+      "mode": "chain",
+      "command": [
+        "${WORKSPACE}/.test-env/bin/dora",
+        "run",
+        "${WORKSPACE}/validation/downstream-msgs210-20261112/review-chain/libero/dataflow.yaml",
+        "--stop-after",
+        "4s"
+      ],
+      "includes_gateway": true,
+      "exit_code": 1,
+      "elapsed_seconds": 1.278,
+      "passed": false,
+      "scope": "Blocked platform/SDK prerequisite diagnostic; not successful transport or hardware acceptance.",
+      "repo": "benchmark-libero",
+      "source_report": "review-chain/libero/report.json",
+      "runtime_errors": [
+        "2026-11-12T08:10:44.417476Z ERROR node_failure: dora_daemon::spawn::prepared: node exited with error: ExitCode(1) node_id=target dataflow_id=01a1cecf-2443-77df-8d44-7816134175d0",
+        "16:10:44 ERROR  target: daemon exited with code 1 with stderr output:",
+        "16:10:45 stdout adapter-forge-gateway: 2026-11-12 16:10:45 - forge_gateway.cli - ERROR - gateway startup failed: Could not initiate node from environment variable. For dynamic node, please add a node id in the initialization function.",
+        "2026-11-12T08:10:45.388162Z ERROR node_failure: dora_daemon::spawn::prepared: node exited with error: ExitCode(1) node_id=adapter-forge-gateway dataflow_id=01a1cecf-2443-77df-8d44-7816134175d0",
+        "16:10:45 ERROR  adapter-forge-gateway: daemon exited with code 1. This error occurred because node `target` exited before connecting to dora."
+      ],
+      "local_evidence": "Full original Dora log is retained under validation/downstream-msgs210-20261112/review-chain/libero/dora.log"
+    }
+  ],
+  "remaining": "Applicable actual hardware/model, final supported-platform artifacts, sustained run and rollback acceptance remain pending.",
+  "acceptance": "Pending; software checks, fake/dummy backends and negative prerequisite records are scoped evidence only. Every new multi-node graph contains adapter-forge-gateway.",
+  "gitlab_sync": "Not performed; follows completed acceptance.",
+  "log_publication": "Original logs remain in the local validation workspace. This public report publishes reviewed commands, outcomes, assertions and limitations only."
+}
